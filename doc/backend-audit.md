@@ -139,3 +139,16 @@
 - 已完成精确别名兼容：HTTP路由解析及IPP处理读取目标时都检查当前路由，避免两步之间切换导致串队列；旧路径提交和作业查询统一返回 `/ipp/print` 的URI。新增真实HTTP回归覆盖文档/实体目标、错误UUID、未选择队列、切换后的旧地址及停止后的拒绝。
 - 本轮库测试在正常主机权限下为34 passed / 0 failed / 4 ignored。初次沙箱内运行有10项被套接字/临时文件访问限制阻止；直接在正常主机权限下运行同一测试二进制全部通过，没有修改实现或放宽校验来绕过测试。
 - 兼容版于19:31:03启动，正常自动打印模式、目标队列不变。实机只读查询验证精确旧地址在HTTP及HTTPS631均返回HTTP200/IPP successful-ok，响应`printer-name=AirPrinter`，提交URI统一为`/ipp/print`；错误UUID仍为404。真实手机复测结果待确认。
+
+## IPP Everywhere 1.1 规范符合性补全（2026-10-11，virtual-gateway-printer 分支）
+
+- 诊断日志（5478条）证实手机 660 次请求全部是 Get-Printer-Attributes 且均 successful-ok；系统打印面板从未发出 Print-Job/Create-Job/Send-Document（4 次 Print-Job 均为本机或网页对照）。手机固定索取但我们没有的属性包括 `printer-mandatory-job-attributes`（每次轮询）、`printer-more-info`、`printer-location`、`printer-dns-sd-name`、`printer-strings-uri`、`printer-supply-info-uri`、`identify-actions-supported` 等。
+- 对照 `doc/cs-ippeve11-20200515-5100.14.md` 表4/5/7/8/10/11/12 补齐：
+  - 操作：新增 Close-Job (0x003B)、Cancel-My-Jobs (0x0039)、Identify-Printer (0x003C)，`operations-supported` 同步声明；Close-Job 将空作业标记完成并返回完整作业属性。
+  - 表5：补 `media-size-supported`、四个 `media-*-margin-supported`、`printer-location`、`printer-organization(-unit)`、`printer-geo-location`（no-value）、`printer-get-attributes-supported`、`printer-icons`（新增 /icons/*.png HTTP端点，绝对URI）、`printer-more-info`（新增 / 信息页）、`job-ids-supported`、`job-constraints/resolvers-supported`（no-value）、`preferred-attributes-supported`、`multiple-operation-timeout-action`、`overrides-supported`、`identify-actions-*`、`printer-mandatory-job-attributes`（no-value）、`printer-dns-sd-name`（与 mDNS 实例名同一计算来源）。
+  - 表7：补 `pages-per-minute(-color)`、`printer-config-change-date-time/-time`、`printer-state-change-date-time/-time`、`printer-current-time`（UTC dateTime）。
+  - 表10/11：作业组补 `job-uuid`（v5，含进程启动时刻避免复用）、`time-at-creation/-processing/-completed`、`date-time-at-*`（未到达的时点用 no-value）、`job-printer-up-time`、`job-impressions(-completed)`。
+  - 表8/12：`options()` 现在处理 `document-name`（无 job-name 时作为作业名）、`printer-resolution`（仅接受已声明的 300dpi）、`multiple-document-handling`（仅 collated）；`media-col-supported` 列出全部已用成员（含四个边距）。
+  - DNS-SD：URF 键与 `urf-supported` 改为按驱动能力动态生成（双面加 DM1、多份加 CP1）；IPP/IPPS 服务新增 `adminurl`；`ty` 截断收紧到64字节以保持 TXT ≤400 字节（测试守护）。
+- 已知遗留偏差：mdns-sd 0.11 每个实例只能注册一个子类型，无法同时发布规范 4.2.1 要求的 `_print._sub._ipp._tcp`（保留 Apple 实际使用的 `_universal._sub`，手机发现已被日志证实）；4.2.3 的 LOC 记录 mdns-sd 不支持；`printer-strings-uri`（RECOMMENDED）与耗材属性（条件必需）继续省略。
+- 验证：库测试 36 passed / 0 failed / 4 ignored（新增 `conformance_attribute_tables_and_operations` 与 `close_job_cancel_my_jobs_and_identify_printer`，响应经线上格式序列化回放校验）；`cargo check --all-targets` 通过。手机系统打印面板是否因此进入提交阶段仍需实机复测。

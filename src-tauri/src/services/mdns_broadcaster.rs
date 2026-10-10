@@ -1,7 +1,4 @@
-use crate::models::{
-    printer::{truncate_utf8, DISCOVERY_REVISION},
-    Printer,
-};
+use crate::models::{printer::truncate_utf8, Printer};
 use mdns_sd::{DaemonEvent, IfKind, ServiceDaemon, ServiceInfo};
 use std::collections::{hash_map::DefaultHasher, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
@@ -70,30 +67,16 @@ impl MdnsBroadcaster {
         port: u16,
         service_type: &str,
     ) -> Result<ServiceInfo, String> {
-        let mut hash = DefaultHasher::new();
-        printer.id.hash(&mut hash);
-        hostname.hash(&mut hash);
-        DISCOVERY_REVISION.hash(&mut hash);
-        // mdns-sd 0.11 does not escape dots in instance labels.
-        let label: String = printer
-            .name
-            .chars()
-            .map(|c| {
-                if c == '.' || c == '\\' || c.is_control() {
-                    '-'
-                } else {
-                    c
-                }
-            })
-            .collect();
-        let name = format!("{}-{:016x}", truncate_utf8(&label, 46), hash.finish());
+        let name = printer.dns_sd_name(hostname);
         let mut properties = vec![
             ("txtvers", "1".to_string()),
             ("rp", printer.resource_path()),
             ("qtotal", "1".to_string()),
             ("UUID", printer.uuid(hostname)),
             ("air", "none".to_string()),
-            ("ty", truncate_utf8(&printer.name, 100).to_string()),
+            // 64 bytes keeps the whole TXT record within the 400-octet mDNS
+            // budget (PWG 5100.14 section 4.2.4) once "adminurl" is included.
+            ("ty", truncate_utf8(&printer.name, 64).to_string()),
             ("product", format!("({})", truncate_utf8(&printer.name, 32))),
             ("kind", "document".to_string()),
             ("priority", "0".to_string()),
@@ -101,7 +84,7 @@ impl MdnsBroadcaster {
                 "pdl",
                 "application/pdf,image/urf,image/jpeg,image/pwg-raster".to_string(),
             ),
-            ("URF", "V1.4,W8,SRGB24,RS300".to_string()),
+            ("URF", printer.capabilities.urf_features().join(",")),
             (
                 "Color",
                 if printer.capabilities.color { "T" } else { "F" }.to_string(),
@@ -127,6 +110,19 @@ impl MdnsBroadcaster {
         ];
         if service_type.contains("_ipps.") {
             properties.push(("TLS", "1.2".into()));
+        }
+        // PWG 5100.14 Table 3: "adminurl" mirrors the IPP "printer-more-info"
+        // attribute. The "_printer._tcp" flagship service uses port 0 (no LPD),
+        // so a usable URL can only be advertised on real IPP/IPPS services.
+        if port != 0 {
+            properties.push((
+                "adminurl",
+                format!(
+                    "http://{}:{}/",
+                    hostname.trim_end_matches('.'),
+                    port
+                ),
+            ));
         }
         ServiceInfo::new(
             service_type,
