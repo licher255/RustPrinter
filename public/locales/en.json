@@ -3,11 +3,8 @@
     "title": "🖨️ AirPrinter"
   },
   "printers": {
-    "title": "Print target",
-    "no_printers": "No Windows printers are available. Connect a printer and install its Windows driver, then refresh.",
-    "target_hint": "Select AirPrinter on your phone; jobs are sent to the printer selected here.",
-    "selected_target": "AirPrinter → {{name}}",
-    "select_target": "Choose {{name}} as the AirPrinter target"
+    "title": "Printers",
+    "no_printers": "No shareable physical printers found. Install the Windows driver and connect your printer, then refresh."
   },
   "logs": {
     "title": "System Logs",
@@ -15,8 +12,8 @@
     "waiting": "Waiting for operations...",
     "fetching_printers": "Fetching printer list...",
     "found_printers": "Found {{count}} printers",
-    "sharing_printer": "Setting AirPrinter target: {{id}}...",
-    "stopped_sharing": "Stopped AirPrinter target: {{id}}"
+    "sharing_printer": "Sharing printer: {{id}}...",
+    "stopped_sharing": "Stopped sharing: {{id}}"
   },
   "status": {
     "online": "Online",
@@ -27,7 +24,7 @@
   "actions": {
     "refresh": "Refresh",
     "share": "Share",
-    "stop_sharing": "Stop AirPrinter",
+    "stop_sharing": "Stop Sharing",
     "sharing": "Sharing...",
     "stopping": "Stopping...",
     "enable_lan_access": "Allow LAN access"
