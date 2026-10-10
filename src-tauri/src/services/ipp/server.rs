@@ -1,3 +1,4 @@
+use super::transport::{self, OriginMap};
 use crate::models::{Printer, PrinterStatus};
 use crate::services::print_job::{self, PrintOptions, FORMATS};
 use ipp::attribute::{IppAttribute, IppAttributeGroup};
@@ -7,7 +8,9 @@ use ipp::reader::IppReader;
 use ipp::request::IppRequestResponse;
 use ipp::value::IppValue;
 use std::collections::HashMap;
-use std::io::{Cursor, Read};
+use std::io::{Cursor, Read, Write};
+use std::net::{IpAddr, SocketAddr, TcpListener};
+use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering},
     Arc, Mutex,
@@ -16,6 +19,11 @@ use std::thread;
 use std::time::{Duration, Instant};
 use tiny_http::{Header, Response, Server};
 
+macro_rules! trace {
+    ($($arg:tt)*) => { crate::services::diagnostics::record(&format!($($arg)*)) };
+}
+
+const DEFAULT_PRINT_PATH: &str = "/ipp/print";
 static NEXT_JOB_ID: AtomicI32 = AtomicI32::new(1);
 const MAX_UPLOAD: u64 = 64 * 1024 * 1024;
 type Backend = fn(&str, &[u8], &str, &PrintOptions, &AtomicBool) -> Result<i32, String>;
@@ -24,6 +32,7 @@ type Backend = fn(&str, &[u8], &str, &PrintOptions, &AtomicBool) -> Result<i32, 
 struct Job {
     id: i32,
     path: String,
+    profile: Printer,
     printer: String,
     owner: String,
     name: String,
@@ -37,9 +46,11 @@ struct Job {
 }
 struct State {
     printers: HashMap<String, (Printer, String)>,
+    routes: HashMap<String, String>,
     jobs: HashMap<i32, Job>,
     started: Instant,
     backend: Backend,
+    receive_directory: Option<PathBuf>,
 }
 type Shared = Arc<Mutex<State>>;
 
@@ -48,8 +59,11 @@ pub struct IppServer {
     shared: Shared,
     running: Arc<AtomicBool>,
     listener: Option<thread::JoinHandle<()>>,
+    transport_listener: Option<thread::JoinHandle<()>>,
     secure_listener: Option<thread::JoinHandle<()>>,
     secure_port: Option<u16>,
+    origins: OriginMap,
+    tls_target: Arc<Mutex<Option<SocketAddr>>>,
 }
 
 impl IppServer {
@@ -58,32 +72,60 @@ impl IppServer {
             address: format!("{bind_address}:{port}"),
             shared: Arc::new(Mutex::new(State {
                 printers: HashMap::new(),
+                routes: HashMap::new(),
                 jobs: HashMap::new(),
                 started: Instant::now(),
                 backend: print_job::submit,
+                receive_directory: None,
             })),
             running: Arc::new(AtomicBool::new(false)),
             listener: None,
+            transport_listener: None,
             secure_listener: None,
             secure_port: None,
+            origins: Arc::new(Mutex::new(HashMap::new())),
+            tls_target: Arc::new(Mutex::new(None)),
         }
     }
 
+    pub fn set_receive_directory(&mut self, directory: Option<PathBuf>) -> Result<(), String> {
+        if directory.as_ref().is_some_and(|path| !path.is_absolute()) {
+            return Err("Receive-only directory must be absolute".into());
+        }
+        self.shared
+            .lock()
+            .map_err(|error| error.to_string())?
+            .receive_directory = directory;
+        Ok(())
+    }
+
     pub fn add_printer(&self, printer: Printer, hostname: &str) -> Result<(), String> {
+        let target_name = printer.name.clone();
+        self.add_routed_printer(printer, &target_name, hostname)
+    }
+
+    pub fn add_routed_printer(
+        &self,
+        printer: Printer,
+        target_name: &str,
+        hostname: &str,
+    ) -> Result<(), String> {
         let path = format!("/{}", printer.resource_path());
         let mut state = self.shared.lock().map_err(|e| e.to_string())?;
         if state.printers.contains_key(&path) {
             return Err("Duplicate printer resource".into());
         }
-        state.printers.insert(path, (printer, hostname.to_string()));
+        state
+            .printers
+            .insert(path.clone(), (printer, hostname.to_string()));
+        state.routes.insert(path, target_name.to_string());
         Ok(())
     }
     pub fn remove_printer(&self, printer: &Printer) -> Result<(), String> {
-        self.shared
-            .lock()
-            .map_err(|e| e.to_string())?
-            .printers
-            .remove(&format!("/{}", printer.resource_path()));
+        let path = format!("/{}", printer.resource_path());
+        let mut state = self.shared.lock().map_err(|e| e.to_string())?;
+        state.printers.remove(&path);
+        state.routes.remove(&path);
         Ok(())
     }
     pub fn update_printer(&self, printer: Printer) -> Result<(), String> {
@@ -93,20 +135,32 @@ impl IppServer {
             .printers
             .get_mut(&path)
             .ok_or("Printer is not shared")?;
+        let target = printer.name.clone();
         current.0 = printer;
+        state.routes.insert(path, target);
+        Ok(())
+    }
+
+    pub fn update_routed_printer(&self, printer: Printer, target_name: &str) -> Result<(), String> {
+        let path = format!("/{}", printer.resource_path());
+        let mut state = self.shared.lock().map_err(|e| e.to_string())?;
+        let current = state
+            .printers
+            .get_mut(&path)
+            .ok_or("Printer is not shared")?;
+        current.0 = printer;
+        state.routes.insert(path, target_name.to_string());
         Ok(())
     }
     pub fn start(&mut self) -> Result<(), String> {
         if self.listener.is_some() {
             return Err("IPP server already running".into());
         }
-        let server = match Server::http(&self.address) {
-            Ok(server) => server,
+        let listener = match TcpListener::bind(&self.address) {
+            Ok(listener) => listener,
             Err(error)
                 if self.address.ends_with(":631")
-                    && error
-                        .downcast_ref::<std::io::Error>()
-                        .is_some_and(|e| e.kind() == std::io::ErrorKind::AddrInUse) =>
+                    && error.kind() == std::io::ErrorKind::AddrInUse =>
             {
                 // Windows can retain TCP 631 after tiny_http closes a connection.
                 // DNS-SD publishes the actual SRV port, so use a reserved fallback
@@ -117,20 +171,33 @@ impl IppServer {
                     .map(|(host, _)| host)
                     .unwrap_or("0.0.0.0");
                 (8631..=8699)
-                    .find_map(|port| Server::http(format!("{bind_host}:{port}")).ok())
+                    .find_map(|port| TcpListener::bind(format!("{bind_host}:{port}")).ok())
                     .ok_or("No free IPP port in 8631-8699")?
             }
             Err(error) => return Err(error.to_string()),
         };
-        self.address = server.server_addr().to_string();
-        let port = server
+        listener
+            .set_nonblocking(true)
+            .map_err(|error| error.to_string())?;
+        let public_address = listener.local_addr().map_err(|error| error.to_string())?;
+        self.address = public_address.to_string();
+        let port = public_address.port();
+        let server = Server::http("127.0.0.1:0").map_err(|error| error.to_string())?;
+        let http_target = server
             .server_addr()
             .to_ip()
-            .ok_or("Missing listener address")?
-            .port();
+            .ok_or("Missing HTTP backend address")?;
         self.running.store(true, Ordering::Release);
-        self.listener = Some(self.serve(server, port));
-        eprintln!("[IPP] listening on {}", self.address);
+        self.listener = Some(self.serve(server, port, self.origins.clone()));
+        self.transport_listener = Some(transport::spawn_mux(
+            listener,
+            http_target,
+            self.tls_target.clone(),
+            self.origins.clone(),
+            self.running.clone(),
+            port,
+        ));
+        trace!("[IPP] listening on {}", self.address);
         Ok(())
     }
 
@@ -156,9 +223,25 @@ impl IppServer {
             };
             let server =
                 Server::from_listener(listener, Some(identity)).map_err(|e| e.to_string())?;
-            self.secure_listener = Some(self.serve(server, port));
+            let actual = server
+                .server_addr()
+                .to_ip()
+                .ok_or("Missing TLS listener address")?;
+            let proxy_ip = match host.parse::<IpAddr>() {
+                Ok(ip) if ip.is_unspecified() => match ip {
+                    IpAddr::V4(_) => IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                    IpAddr::V6(_) => IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
+                },
+                _ => actual.ip(),
+            };
+            *self
+                .tls_target
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) =
+                Some(SocketAddr::new(proxy_ip, actual.port()));
+            self.secure_listener = Some(self.serve(server, port, self.origins.clone()));
             self.secure_port = Some(port);
-            eprintln!("[IPPS] TLS listening on {host}:{port}");
+            trace!("[IPPS] TLS listening on {host}:{port}");
             return Ok(());
         }
         Err(last_error)
@@ -168,7 +251,7 @@ impl IppServer {
         self.secure_port
     }
 
-    fn serve(&self, server: Server, port: u16) -> thread::JoinHandle<()> {
+    fn serve(&self, server: Server, port: u16, origins: OriginMap) -> thread::JoinHandle<()> {
         let shared = self.shared.clone();
         let running = self.running.clone();
         running.store(true, Ordering::Release);
@@ -179,13 +262,14 @@ impl IppServer {
                     Ok(Some(request)) => {
                         // ponytail: bounded handlers, replace with a worker pool only if needed.
                         if active.load(Ordering::Acquire) >= 8 {
-                            eprintln!("[IPP] rejecting request: handler limit reached");
+                            trace!("[IPP] rejecting request: handler limit reached");
                             let _ = request.respond(Response::empty(503));
                             continue;
                         }
                         active.fetch_add(1, Ordering::AcqRel);
                         let active = active.clone();
                         let shared = shared.clone();
+                        let origins = origins.clone();
                         thread::spawn(move || {
                             struct Guard(Arc<AtomicUsize>);
                             impl Drop for Guard {
@@ -194,11 +278,14 @@ impl IppServer {
                                 }
                             }
                             let _guard = Guard(active);
-                            Self::handle_request(request, &shared, port);
+                            Self::handle_request(request, &shared, &origins, port);
                         });
                     }
                     Ok(None) => (),
-                    Err(_) => break,
+                    Err(error) => {
+                        trace!("[IPP] listener port={port} failed: {error}");
+                        break;
+                    }
                 }
             }
         })
@@ -211,14 +298,52 @@ impl IppServer {
             .ok_or("Invalid IPP listener address".into())
     }
 
-    fn handle_request(mut request: tiny_http::Request, shared: &Shared, port: u16) {
-        eprintln!(
+    fn handle_request(
+        mut request: tiny_http::Request,
+        shared: &Shared,
+        origins: &OriginMap,
+        listener_port: u16,
+    ) {
+        let mapped = request.remote_addr().and_then(|addr| {
+            origins
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .get(addr)
+                .copied()
+        });
+        let remote_addr = mapped
+            .map(|origin| origin.peer)
+            .or_else(|| request.remote_addr().copied());
+        let port = mapped
+            .map(|origin| origin.public_port)
+            .unwrap_or(listener_port);
+        trace!(
             "[IPP] {} {} from {:?} secure={}",
             request.method(),
             request.url(),
-            request.remote_addr(),
+            remote_addr,
             request.secure()
         );
+        let mut has_receive_header = false;
+        let mut invalid_receive_header = false;
+        for header in request.headers() {
+            if header.field.equiv("X-AirPrinter-Receive-Only") {
+                has_receive_header = true;
+                invalid_receive_header |= header.value.as_str() != "1";
+            }
+        }
+        if has_receive_header {
+            let receive_enabled = shared
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .receive_directory
+                .is_some();
+            if !receive_enabled || invalid_receive_header {
+                trace!("[IPP] rejecting receive-only web request: mode disabled or invalid marker");
+                let _ = request.respond(Response::empty(409));
+                return;
+            }
+        }
         #[cfg(debug_assertions)]
         if request.method() == &tiny_http::Method::Get && request.url() == "/debug/test.jpg" {
             let _ = request.respond(
@@ -266,25 +391,61 @@ impl IppServer {
             ));
             return;
         }
+        if request.method() == &tiny_http::Method::Get && request.url() == "/receive" {
+            let Some((hostname, page)) = receive_page(shared) else {
+                let _ = request.respond(Response::empty(404));
+                return;
+            };
+            let host = request
+                .headers()
+                .iter()
+                .find(|header| header.field.equiv("Host"))
+                .map(|header| header.value.as_str())
+                .unwrap_or("");
+            if !valid_host(host, &hostname, port) {
+                trace!("[IPP] rejecting receive page: invalid Host header");
+                let _ = request.respond(Response::empty(400));
+                return;
+            }
+            let _ = request.respond(
+                Response::from_string(page)
+                    .with_header(
+                        Header::from_bytes("Content-Type", "text/html; charset=utf-8").unwrap(),
+                    )
+                    .with_header(Header::from_bytes("Cache-Control", "no-store").unwrap()),
+            );
+            return;
+        }
         let requested_path = request.url().to_string();
-        let path = requested_path
+        let request_base = requested_path
             .split_once("/jobs/")
             .map(|(path, _)| path)
             .unwrap_or(&requested_path)
             .to_string();
-        let selected = shared
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .printers
-            .get(&path)
-            .cloned();
-        let Some((_, hostname)) = selected else {
-            eprintln!("[IPP] rejecting request: unknown path");
+        let (selected, shared_count) = {
+            let state = shared.lock().unwrap_or_else(|e| e.into_inner());
+            let count = state.printers.len();
+            let selected = resolve_printer_path(&request_base, &state.printers, &state.routes)
+                .and_then(|(path, is_alias)| {
+                    state
+                        .printers
+                        .get(&path)
+                        .map(|(_, hostname)| (path, hostname.clone(), is_alias))
+                });
+            (selected, count)
+        };
+        let Some((path, hostname, is_alias)) = selected else {
+            trace!("[IPP] rejecting request: unknown path actual_path={requested_path:?} shared_printers={shared_count}");
             let _ = request.respond(Response::empty(404));
             return;
         };
+        let alias_path = is_alias.then_some(request_base.as_str());
+        let path_job_id = requested_path
+            .strip_prefix(&format!("{request_base}/jobs/"))
+            .and_then(|id| id.parse::<i32>().ok());
+        let is_job_path = requested_path != request_base;
         if request.method() != &tiny_http::Method::Post {
-            eprintln!("[IPP] rejecting request: method is not POST");
+            trace!("[IPP] rejecting request: method is not POST");
             let _ = request.respond(Response::empty(405));
             return;
         }
@@ -295,7 +456,7 @@ impl IppServer {
             .map(|h| h.value.as_str())
             .unwrap_or("")
             .to_string();
-        eprintln!(
+        trace!(
             "[IPP] host={host:?} body_length={:?} content_type={:?} transfer_encoding={:?} expect={:?}",
             request.body_length(),
             request.headers().iter().find(|h| h.field.equiv("Content-Type")).map(|h| h.value.as_str()),
@@ -303,7 +464,7 @@ impl IppServer {
             request.headers().iter().find(|h| h.field.equiv("Expect")).map(|h| h.value.as_str()),
         );
         if !valid_host(&host, &hostname, port) {
-            eprintln!("[IPP] rejecting request: invalid Host header");
+            trace!("[IPP] rejecting request: invalid Host header");
             let _ = request.respond(Response::empty(400));
             return;
         }
@@ -313,7 +474,7 @@ impl IppServer {
             .find(|h| h.field.equiv("Content-Type"))
             .map(|h| h.value.as_str().split(';').next().unwrap_or("").trim());
         if !content_type.is_some_and(|c| c.eq_ignore_ascii_case("application/ipp")) {
-            eprintln!("[IPP] rejecting request: unsupported Content-Type");
+            trace!("[IPP] rejecting request: unsupported Content-Type");
             let _ = request.respond(Response::empty(415));
             return;
         }
@@ -321,7 +482,7 @@ impl IppServer {
             .body_length()
             .is_some_and(|size| size as u64 > MAX_UPLOAD)
         {
-            eprintln!("[IPP] rejecting request: Content-Length exceeds limit");
+            trace!("[IPP] rejecting request: Content-Length exceeds limit");
             let _ = request.respond(Response::empty(413));
             return;
         }
@@ -332,18 +493,18 @@ impl IppServer {
             .read_to_end(&mut body)
             .is_err()
         {
-            eprintln!("[IPP] rejecting request: failed to read body");
+            trace!("[IPP] rejecting request: failed to read body");
             let _ = request.respond(Response::empty(400));
             return;
         }
-        eprintln!("[IPP] body_bytes={}", body.len());
+        trace!("[IPP] body_bytes={}", body.len());
         if body.len() as u64 > MAX_UPLOAD {
-            eprintln!("[IPP] rejecting request: body exceeds limit");
+            trace!("[IPP] rejecting request: body exceeds limit");
             let _ = request.respond(Response::empty(413));
             return;
         }
         if body.len() < 9 {
-            eprintln!("[IPP] rejecting request: short body");
+            trace!("[IPP] rejecting request: short body");
             let _ = request.respond(Response::empty(400));
             return;
         }
@@ -352,39 +513,62 @@ impl IppServer {
             std::panic::catch_unwind(|| IppParser::new(IppReader::new(Cursor::new(body))).parse());
         let response = match parsed {
             Ok(Ok(req)) => {
-                eprintln!(
-                    "[IPP] request_id={id} operation={:#06x}",
-                    req.header().operation_or_status
+                trace!(
+                    "[IPP] request_id={id} operation={:#06x} version={:?}",
+                    req.header().operation_or_status,
+                    req.header().version
                 );
-                let job_path_matches = if requested_path != path {
-                    requested_path
-                        .strip_prefix(&format!("{path}/jobs/"))
-                        .and_then(|id| id.parse::<i32>().ok())
-                        .is_some_and(|id| {
-                            attr(&req, "job-id") == Some(&IppValue::Integer(id))
-                                || string_attr(&req, "job-uri")
-                                    .is_some_and(|uri| uri.ends_with(&format!("/jobs/{id}")))
-                        })
+                trace!(
+                    "[IPP] request_id={id} actual_path={requested_path:?} canonical_path={path:?} printer_uri={:?}",
+                    string_attr(&req, "printer-uri")
+                );
+                let job_path_matches = if is_job_path {
+                    path_job_id.is_some_and(|id| {
+                        attr(&req, "job-id") == Some(&IppValue::Integer(id))
+                            || string_attr(&req, "job-uri")
+                                .is_some_and(|uri| uri.ends_with(&format!("/jobs/{id}")))
+                    })
                 } else {
                     true
                 };
                 if job_path_matches {
-                    process_request(shared, &path, &host, req, request.secure())
+                    let authority = response_authority(remote_addr, &host, port, request.secure());
+                    trace!("[IPP] request_id={id} response_authority={authority:?}");
+                    process_request_at_port_with_alias(
+                        shared,
+                        &path,
+                        alias_path,
+                        &authority,
+                        req,
+                        request.secure(),
+                        port,
+                    )
                 } else {
                     reply(req.header().version, id, StatusCode::ClientErrorNotFound)
                 }
             }
-            _ => reply(IppVersion::v2_0(), id, StatusCode::ClientErrorBadRequest),
+            Ok(Err(error)) => {
+                trace!("[IPP] request_id={id} parse failed: {error}");
+                reply(IppVersion::v2_0(), id, StatusCode::ClientErrorBadRequest)
+            }
+            Err(_) => {
+                trace!("[IPP] request_id={id} parser panicked");
+                reply(IppVersion::v2_0(), id, StatusCode::ClientErrorBadRequest)
+            }
         };
-        eprintln!(
-            "[IPP] request_id={id} status={:#06x}",
-            response.header().operation_or_status
+        let response_bytes = response.to_bytes();
+        trace!(
+            "[IPP] request_id={id} actual_path={requested_path:?} status={:#06x} response_bytes={}",
+            response.header().operation_or_status,
+            response_bytes.len()
         );
-        let _ = request.respond(
-            Response::from_data(response.to_bytes().to_vec())
+        if let Err(error) = request.respond(
+            Response::from_data(response_bytes.to_vec())
                 .with_header(Header::from_bytes("Content-Type", "application/ipp").unwrap())
                 .with_header(Header::from_bytes("Cache-Control", "no-cache").unwrap()),
-        );
+        ) {
+            trace!("[IPP] request_id={id} response failed: {error}");
+        }
     }
 }
 
@@ -402,7 +586,68 @@ impl Drop for IppServer {
         if let Some(listener) = self.secure_listener.take() {
             let _ = listener.join();
         }
+        if let Some(listener) = self.transport_listener.take() {
+            let _ = listener.join();
+        }
     }
+}
+
+fn resolve_printer_path(
+    request_path: &str,
+    printers: &HashMap<String, (Printer, String)>,
+    routes: &HashMap<String, String>,
+) -> Option<(String, bool)> {
+    if request_path == DEFAULT_PRINT_PATH {
+        if printers.len() != 1 {
+            return None;
+        }
+        return printers
+            .keys()
+            .next()
+            .cloned()
+            .map(|path| (path.clone(), path != request_path));
+    }
+    if printers.contains_key(request_path) {
+        return Some((request_path.to_string(), false));
+    }
+    for (public_path, (printer, _)) in printers {
+        if printer.id != crate::models::printer::GATEWAY_PRINTER_ID {
+            continue;
+        }
+        let target_name = routes.get(public_path)?;
+        if request_path == legacy_target_resource_path(target_name) {
+            return Some((public_path.clone(), true));
+        }
+    }
+    None
+}
+
+fn legacy_target_resource_path(target_name: &str) -> String {
+    // PrinterDetector uses the Windows queue name as `Printer.id`.
+    let id = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, target_name.as_bytes()).simple();
+    format!("/ipp/print/{id}")
+}
+
+fn receive_page(shared: &Shared) -> Option<(String, String)> {
+    let state = shared.lock().unwrap_or_else(|error| error.into_inner());
+    if state.receive_directory.is_none() || state.printers.len() != 1 {
+        return None;
+    }
+    let (path, (_, hostname)) = state.printers.iter().next()?;
+    let path = escape_html_attribute(path);
+    Some((
+        hostname.clone(),
+        include_str!("receive.html").replace("__PRINTER_PATH__", &path),
+    ))
+}
+
+fn escape_html_attribute(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('\'', "&#39;")
 }
 
 fn valid_host(authority: &str, hostname: &str, port: u16) -> bool {
@@ -411,10 +656,11 @@ fn valid_host(authority: &str, hostname: &str, port: u16) -> bool {
     if supplied_port.parse::<u16>().ok() != Some(port) {
         return false;
     }
-    if host
-        .trim_end_matches('.')
-        .eq_ignore_ascii_case(hostname.trim_end_matches('.'))
-    {
+    let local_name = std::env::var("COMPUTERNAME")
+        .ok()
+        .filter(|name| !name.trim().is_empty())
+        .or_else(|| std::env::var("HOSTNAME").ok());
+    if is_local_hostname(host, hostname, local_name.as_deref()) {
         return true;
     }
     let Ok(ip) = host.parse::<std::net::Ipv4Addr>() else {
@@ -432,6 +678,55 @@ fn valid_host(authority: &str, hostname: &str, port: u16) -> bool {
         .unwrap_or(false)
 }
 
+fn is_local_hostname(host: &str, configured: &str, computer_name: Option<&str>) -> bool {
+    let host = host.trim_end_matches('.');
+    if host.eq_ignore_ascii_case(configured.trim_end_matches('.')) {
+        return true;
+    }
+    let Some(computer_name) = computer_name.map(|name| name.trim_end_matches('.')) else {
+        return false;
+    };
+    if computer_name.is_empty() {
+        return false;
+    }
+    if computer_name.to_ascii_lowercase().ends_with(".local") {
+        host.eq_ignore_ascii_case(computer_name)
+    } else {
+        host.eq_ignore_ascii_case(&format!("{computer_name}.local"))
+    }
+}
+
+fn response_authority(
+    peer: Option<std::net::SocketAddr>,
+    host: &str,
+    port: u16,
+    secure: bool,
+) -> String {
+    let hostname = host.rsplit_once(':').map(|(host, _)| host).unwrap_or(host);
+    // IPPS keeps the DNS hostname that appears in the persistent TLS certificate.
+    if !secure
+        && hostname
+            .trim_end_matches('.')
+            .to_ascii_lowercase()
+            .ends_with(".local")
+    {
+        if let Some(std::net::SocketAddr::V4(peer)) = peer {
+            // A UDP connect selects the OS route without sending a datagram. Use
+            // its source address, not the first NIC (which may be a virtual adapter).
+            let local = std::net::UdpSocket::bind("0.0.0.0:0").and_then(|socket| {
+                socket.connect(peer)?;
+                socket.local_addr()
+            });
+            if let Ok(local) = local {
+                if !local.ip().is_unspecified() {
+                    return format!("{}:{port}", local.ip());
+                }
+            }
+        }
+    }
+    format!("{hostname}:{port}")
+}
+
 fn valid_ipp_authority(authority: &str, hostname: &str, port: u16) -> bool {
     // RFC 3510: an ipp:// URI without an explicit port means TCP 631.
     // The HTTP Host header can also omit the default 631 port.
@@ -445,6 +740,7 @@ fn valid_ipp_authority(authority: &str, hostname: &str, port: u16) -> bool {
 fn job_id_from_uri(
     value: &str,
     path: &str,
+    alias_path: Option<&str>,
     hostname: &str,
     port: u16,
     scheme: &str,
@@ -458,7 +754,10 @@ fn job_id_from_uri(
         return None;
     }
     uri.path()
-        .strip_prefix(&format!("{path}/jobs/"))?
+        .strip_prefix(&format!("{path}/jobs/"))
+        .or_else(|| {
+            alias_path.and_then(|alias| uri.path().strip_prefix(&format!("{alias}/jobs/")))
+        })?
         .parse::<i32>()
         .ok()
 }
@@ -496,6 +795,18 @@ fn keywords(values: &[&str]) -> IppValue {
 }
 
 fn wants_printer_attribute(requested: Option<&IppValue>, name: &str) -> bool {
+    // AirPrint's observed polling lists omit the printer URI. Include the
+    // canonical submission endpoint and its matching security/authentication
+    // values so the client can follow the IPv4 compatibility address.
+    if [
+        "printer-uri-supported",
+        "uri-security-supported",
+        "uri-authentication-supported",
+    ]
+    .contains(&name)
+    {
+        return true;
+    }
     let matches = |value: &IppValue| matches!(value, IppValue::Keyword(key) if key == name || key == "all" || key == "printer-description" || key == "job-template");
     match requested {
         None => true,
@@ -525,6 +836,9 @@ fn options(
             return Err(StatusCode::ClientErrorAttributesOrValuesNotSupported);
         }
     }
+    if attr(req, "output-bin").is_some_and(|value| value != &IppValue::Keyword("auto".into())) {
+        return Err(StatusCode::ClientErrorAttributesOrValuesNotSupported);
+    }
     if let Some(value) = attr(req, "print-quality") {
         if let IppValue::Enum(quality @ 3..=5) = value {
             options.quality = *quality;
@@ -532,11 +846,52 @@ fn options(
             return Err(StatusCode::ClientErrorAttributesOrValuesNotSupported);
         }
     }
-    if attr(req, "page-ranges").is_some() {
-        return Err(StatusCode::ClientErrorAttributesOrValuesNotSupported);
+    if let Some(value) = attr(req, "page-ranges") {
+        let values = match value {
+            IppValue::Array(values) => values.as_slice(),
+            value => std::slice::from_ref(value),
+        };
+        let mut ranges = Vec::new();
+        let mut previous = 0;
+        for value in values {
+            let IppValue::RangeOfInteger { min, max } = value else {
+                return Err(StatusCode::ClientErrorAttributesOrValuesNotSupported);
+            };
+            // RFC 8011: page ranges must be positive, ascending and non-overlapping.
+            if *min <= previous || max < min {
+                return Err(StatusCode::ClientErrorBadRequest);
+            }
+            ranges.push((*min, *max));
+            previous = *max;
+        }
+        if ranges.is_empty() {
+            return Err(StatusCode::ClientErrorBadRequest);
+        }
+        options.page_ranges = ranges;
     }
-    if string_attr(req, "print-scaling").is_some_and(|value| !["auto", "fit"].contains(&value)) {
-        return Err(StatusCode::ClientErrorAttributesOrValuesNotSupported);
+    if let Some(value) = attr(req, "print-scaling") {
+        match value {
+            IppValue::Keyword(value)
+                if ["auto", "auto-fit", "fit", "fill", "none"].contains(&value.as_str()) =>
+            {
+                options.scaling = value.clone();
+            }
+            _ => return Err(StatusCode::ClientErrorAttributesOrValuesNotSupported),
+        }
+    }
+    if let Some(value) = attr(req, "ipp-attribute-fidelity") {
+        if let IppValue::Boolean(value) = value {
+            options.fidelity = *value;
+        } else {
+            return Err(StatusCode::ClientErrorBadRequest);
+        }
+    }
+    if let Some(value) = attr(req, "job-name") {
+        options.job_name = match value {
+            IppValue::NameWithoutLanguage(value) => value.clone(),
+            IppValue::NameWithLanguage { name, .. } => name.clone(),
+            _ => return Err(StatusCode::ClientErrorAttributesOrValuesNotSupported),
+        };
     }
     if let Some(value) = attr(req, "copies") {
         if let IppValue::Integer(value) = value {
@@ -562,6 +917,14 @@ fn options(
         let IppValue::Collection(media) = value else {
             return Err(StatusCode::ClientErrorAttributesOrValuesNotSupported);
         };
+        for (name, supported) in [("media-source", "auto"), ("media-type", "stationery")] {
+            if media
+                .get(name)
+                .is_some_and(|value| value != &IppValue::Keyword(supported.into()))
+            {
+                return Err(StatusCode::ClientErrorAttributesOrValuesNotSupported);
+            }
+        }
         if let Some(IppValue::Keyword(name)) = media.get("media-size-name") {
             options.media = name.clone();
         } else if let Some(IppValue::Collection(size)) = media.get("media-size") {
@@ -614,12 +977,41 @@ fn process(shared: &Shared, path: &str, host: &str, req: IppRequestResponse) -> 
     process_request(shared, path, host, req, false)
 }
 
+#[cfg(test)]
 fn process_request(
     shared: &Shared,
     path: &str,
     host: &str,
     req: IppRequestResponse,
     secure: bool,
+) -> IppRequestResponse {
+    let port = host
+        .rsplit_once(':')
+        .and_then(|(_, number)| number.parse().ok())
+        .unwrap_or(631);
+    process_request_at_port(shared, path, host, req, secure, port)
+}
+
+#[cfg(test)]
+fn process_request_at_port(
+    shared: &Shared,
+    path: &str,
+    host: &str,
+    req: IppRequestResponse,
+    secure: bool,
+    port: u16,
+) -> IppRequestResponse {
+    process_request_at_port_with_alias(shared, path, None, host, req, secure, port)
+}
+
+fn process_request_at_port_with_alias(
+    shared: &Shared,
+    path: &str,
+    alias_path: Option<&str>,
+    host: &str,
+    req: IppRequestResponse,
+    secure: bool,
+    port: u16,
 ) -> IppRequestResponse {
     let id = req.header().request_id;
     let version = req.header().version;
@@ -630,20 +1022,35 @@ fn process_request(
     if string_attr(&req, "attributes-charset") != Some("utf-8") {
         return error(StatusCode::ClientErrorCharsetNotSupported);
     }
-    let printer = {
+    let (mut printer, mut target_name) = {
         let mut state = shared.lock().unwrap_or_else(|e| e.into_inner());
-        for job in state
-            .jobs
-            .values_mut()
-            .filter(|j| j.state == 4 && j.created.elapsed() > Duration::from_secs(60))
-        {
+        for job in state.jobs.values_mut().filter(|j| {
+            j.state == 4
+                && j.reason == "job-incoming"
+                && j.created.elapsed() > Duration::from_secs(60)
+        }) {
             job.state = 8;
             job.reason = "job-data-insufficient".into();
+            job.message = "No document received within 60 seconds".into();
+            trace!("[IPP] job={} timed out waiting for Send-Document", job.id);
         }
-        match state.printers.get(path) {
-            Some((p, _)) => p.clone(),
-            None => return error(StatusCode::ClientErrorNotFound),
+        let Some((p, _)) = state.printers.get(path) else {
+            return error(StatusCode::ClientErrorNotFound);
+        };
+        let target = state
+            .routes
+            .get(path)
+            .cloned()
+            .unwrap_or_else(|| p.name.clone());
+        if let Some(alias) = alias_path.filter(|alias| *alias != path) {
+            let default_alias = alias == DEFAULT_PRINT_PATH && state.printers.len() == 1;
+            let current_gateway_target = p.id == crate::models::printer::GATEWAY_PRINTER_ID
+                && alias == legacy_target_resource_path(&target);
+            if !default_alias && !current_gateway_target {
+                return error(StatusCode::ClientErrorNotFound);
+            }
         }
+        (p.clone(), target)
     };
     let scheme = if secure { "ipps" } else { "ipp" };
     let uri = format!("{scheme}://{host}{path}");
@@ -655,26 +1062,23 @@ fn process_request(
             .get(path)
             .map(|(_, h)| h.clone())
             .unwrap_or_default();
-        let port = host
-            .rsplit_once(':')
-            .and_then(|(_, p)| p.parse().ok())
-            .unwrap_or(631);
         let valid = target.parse::<ipp::prelude::Uri>().ok().is_some_and(|uri| {
             uri.scheme_str() == Some(scheme)
-                && uri.path() == path
+                && (uri.path() == path || alias_path == Some(uri.path()))
                 && uri.query().is_none()
                 && uri
                     .authority()
                     .is_some_and(|a| valid_ipp_authority(a.as_str(), &hostname, port))
         });
         if !valid {
+            trace!("[IPP] rejecting printer-uri={target:?}; expected={uri:?}");
             return error(StatusCode::ClientErrorNotFound);
         }
     }
     let op = req.header().operation_or_status;
     if op == 0x000b {
         #[cfg(debug_assertions)]
-        eprintln!(
+        trace!(
             "[IPP] requested-attributes={:?} document-format={:?}",
             attr(&req, "requested-attributes"),
             attr(&req, "document-format")
@@ -687,14 +1091,6 @@ fn process_request(
             id,
             attr(&req, "requested-attributes"),
         );
-    }
-    if [0x0002, 0x0004, 0x0005, 0x0006].contains(&op)
-        && matches!(
-            printer.status,
-            PrinterStatus::Offline | PrinterStatus::Error(_)
-        )
-    {
-        return error(StatusCode::ServerErrorNotAcceptingJobs);
     }
     if op == 0x000a {
         let which = string_attr(&req, "which-jobs").unwrap_or("not-completed");
@@ -744,12 +1140,8 @@ fn process_request(
         .get(path)
         .map(|(_, hostname)| hostname.clone())
         .unwrap_or_default();
-    let port = host
-        .rsplit_once(':')
-        .and_then(|(_, number)| number.parse().ok())
-        .unwrap_or(631);
     let supplied_job_uri_id = string_attr(&req, "job-uri")
-        .and_then(|value| job_id_from_uri(value, path, &hostname, port, scheme));
+        .and_then(|value| job_id_from_uri(value, path, alias_path, &hostname, port, scheme));
     if attr(&req, "job-uri").is_some() && supplied_job_uri_id.is_none() {
         return error(StatusCode::ClientErrorNotFound);
     }
@@ -805,7 +1197,7 @@ fn process_request(
         match state
             .jobs
             .get(&target_id.unwrap_or(0))
-            .filter(|j| j.path == path && j.state == 4)
+            .filter(|j| j.path == path && j.state == 4 && j.reason == "job-incoming")
         {
             Some(job) => Some(job.clone()),
             None => return error(StatusCode::ClientErrorNotFound),
@@ -813,6 +1205,18 @@ fn process_request(
     } else {
         None
     };
+    if let Some(job) = &existing {
+        printer = job.profile.clone();
+        target_name = job.printer.clone();
+    }
+    if [0x0002, 0x0004, 0x0005, 0x0006].contains(&op)
+        && matches!(
+            printer.status,
+            PrinterStatus::Offline | PrinterStatus::Error(_)
+        )
+    {
+        return error(StatusCode::ServerErrorNotAcceptingJobs);
+    }
     if op == 0x0006 && attr(&req, "last-document") != Some(&IppValue::Boolean(true)) {
         return error(StatusCode::ServerErrorMultipleDocumentJobsNotSupported);
     }
@@ -832,13 +1236,13 @@ fn process_request(
         "document-format",
     ] {
         if let Some(value) = attr(&req, name) {
-            eprintln!("[IPP] job option {name}={value:?}");
+            trace!("[IPP] job option {name}={value:?}");
         }
     }
     let opts = match options(&req, &printer, existing.as_ref().map(|j| &j.options)) {
         Ok(o) => o,
         Err(e) => {
-            eprintln!("[IPP] job options rejected: {e:?}");
+            trace!("[IPP] job options rejected: {e:?}");
             return error(e);
         }
     };
@@ -854,9 +1258,7 @@ fn process_request(
     let owner = string_attr(&req, "requesting-user-name")
         .unwrap_or("anonymous")
         .to_string();
-    let name = string_attr(&req, "job-name")
-        .unwrap_or("AirPrint document")
-        .to_string();
+    let name = opts.job_name.clone();
     let mut document = Vec::new();
     if req.into_payload().read_to_end(&mut document).is_err() {
         return error(StatusCode::ClientErrorBadRequest);
@@ -881,14 +1283,21 @@ fn process_request(
         if !state.printers.contains_key(path) {
             return error(StatusCode::ClientErrorNotFound);
         }
-        if state.jobs.values().filter(|j| j.state < 7).count() >= 32 && existing.is_none() {
+        if state
+            .jobs
+            .values()
+            .filter(|j| j.path == path && j.state < 7)
+            .count()
+            >= 32
+            && existing.is_none()
+        {
             return error(StatusCode::ServerErrorBusy);
         }
         if op != 0x0005
             && state
                 .jobs
                 .values()
-                .filter(|j| matches!(j.state, 3 | 5 | 6))
+                .filter(|j| j.path == path && matches!(j.state, 3 | 5 | 6))
                 .count()
                 >= 4
         {
@@ -906,7 +1315,11 @@ fn process_request(
             }
         }
         let mut job = if let Some(existing) = existing {
-            if !state.jobs.get(&existing.id).is_some_and(|j| j.state == 4) {
+            if !state
+                .jobs
+                .get(&existing.id)
+                .is_some_and(|j| j.state == 4 && j.reason == "job-incoming")
+            {
                 return error(StatusCode::ClientErrorNotPossible);
             }
             existing
@@ -920,7 +1333,8 @@ fn process_request(
             Job {
                 id: job_id,
                 path: path.into(),
-                printer: printer.name.clone(),
+                profile: printer.clone(),
+                printer: target_name.clone(),
                 options: opts.clone(),
                 owner,
                 name,
@@ -932,6 +1346,7 @@ fn process_request(
                 created: Instant::now(),
             }
         };
+        job.name = opts.job_name.clone();
         job.options = opts;
         if op != 0x0005 {
             job.state = 3;
@@ -977,11 +1392,53 @@ fn job_group(job: &Job, uri: &str) -> IppAttributeGroup {
 }
 
 fn run_job(shared: Shared, job: Job, document: Vec<u8>, format: String) {
-    eprintln!(
-        "[IPP] job={} received document bytes={} format={format}",
+    trace!(
+        "[IPP] job={} path={:?} target_queue={:?} received document bytes={} format={format} options={:?}",
         job.id,
-        document.len()
+        job.path,
+        job.printer,
+        document.len(),
+        job.options
     );
+    let receive_directory = shared
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .receive_directory
+        .clone();
+    if let Some(directory) = receive_directory {
+        let result = save_received_document(&directory, job.id, &format, &document);
+        match result {
+            Ok(path) => {
+                let mut state = shared.lock().unwrap_or_else(|error| error.into_inner());
+                if let Some(current) = state.jobs.get_mut(&job.id) {
+                    if current.canceled.load(Ordering::Acquire) {
+                        current.state = 7;
+                        current.reason = "job-canceled-by-user".into();
+                        current.message.clear();
+                    } else {
+                        current.state = 4;
+                        current.reason = "job-hold-until-specified".into();
+                        current.message = format!(
+                            "Received {} bytes; diagnostic only; no Windows print submitted. Saved: {}",
+                            document.len(),
+                            path.display()
+                        );
+                    }
+                }
+                trace!(
+                    "[IPP] job={} receive-only saved bytes={} path={}",
+                    job.id,
+                    document.len(),
+                    path.display()
+                );
+            }
+            Err(error) => {
+                trace!("[IPP] job={} receive-only save failed: {error}", job.id);
+                set_job(&shared, job.id, 8, "document-unprintable-error", &error);
+            }
+        }
+        return;
+    }
     thread::spawn(move || {
         let backend = shared.lock().unwrap_or_else(|e| e.into_inner()).backend;
         set_job(&shared, job.id, 5, "job-transforming", "");
@@ -993,6 +1450,7 @@ fn run_job(shared: Shared, job: Job, document: Vec<u8>, format: String) {
             &job.canceled,
         ) {
             Err(error) => {
+                trace!("[IPP] job={} Windows submission failed: {error}", job.id);
                 if job.canceled.load(Ordering::Acquire) {
                     set_job(&shared, job.id, 7, "job-canceled-by-user", "");
                 } else {
@@ -1000,7 +1458,7 @@ fn run_job(shared: Shared, job: Job, document: Vec<u8>, format: String) {
                 }
             }
             Ok(spool_id) => {
-                eprintln!("[IPP] job={} Windows spool_id={spool_id}", job.id);
+                trace!("[IPP] job={} Windows spool_id={spool_id}", job.id);
                 if let Some(current) = shared
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
@@ -1075,6 +1533,35 @@ fn run_job(shared: Shared, job: Job, document: Vec<u8>, format: String) {
         }
     });
 }
+
+fn save_received_document(
+    directory: &std::path::Path,
+    job_id: i32,
+    format: &str,
+    document: &[u8],
+) -> Result<PathBuf, String> {
+    let extension = match format {
+        "application/pdf" => ".pdf",
+        "image/jpeg" => ".jpg",
+        "image/urf" => ".urf",
+        "image/pwg-raster" => ".pwg",
+        _ => return Err(format!("Unsupported receive-only format: {format}")),
+    };
+    let prefix = format!("airprinter-job-{job_id}-");
+    let mut temp = tempfile::Builder::new()
+        .prefix(&prefix)
+        .suffix(extension)
+        .tempfile_in(directory)
+        .map_err(|error| format!("Could not create receive file: {error}"))?;
+    temp.write_all(document)
+        .map_err(|error| format!("Could not write receive file: {error}"))?;
+    temp.as_file()
+        .sync_all()
+        .map_err(|error| format!("Could not sync receive file: {error}"))?;
+    temp.keep()
+        .map(|(_, path)| path)
+        .map_err(|error| format!("Could not keep receive file: {}", error.error))
+}
 fn set_job(shared: &Shared, id: i32, state: i32, reason: &str, message: &str) {
     if let Some(job) = shared
         .lock()
@@ -1083,7 +1570,7 @@ fn set_job(shared: &Shared, id: i32, state: i32, reason: &str, message: &str) {
         .get_mut(&id)
     {
         if job.state != state || job.message != message {
-            eprintln!("[IPP] job={id} state={state} reason={reason} message={message}");
+            trace!("[IPP] job={id} state={state} reason={reason} message={message}");
         }
         if job.canceled.load(Ordering::Acquire) && state >= 7 {
             job.state = 7;
@@ -1106,10 +1593,11 @@ fn printer_attributes(
     requested: Option<&IppValue>,
 ) -> IppRequestResponse {
     let state = shared.lock().unwrap_or_else(|e| e.into_inner());
+    let path = format!("/{}", printer.resource_path());
     let active = state
         .jobs
         .values()
-        .filter(|j| j.printer == printer.name && j.state < 7)
+        .filter(|j| j.path == path && j.state < 7)
         .count();
     let available = matches!(printer.status, PrinterStatus::Online | PrinterStatus::Busy);
     let caps = &printer.capabilities;
@@ -1210,6 +1698,30 @@ fn printer_attributes(
         IppValue::MimeMediaType("application/pdf".into()),
     );
     put("document-password-supported", IppValue::Integer(0));
+    // PWG 5100.13: declaring PDF/JPEG also requires their size/feature attributes.
+    for name in [
+        "pdf-k-octets-supported",
+        "jpeg-k-octets-supported",
+        "job-k-octets-supported",
+    ] {
+        put(
+            name,
+            IppValue::RangeOfInteger {
+                min: 0,
+                max: (MAX_UPLOAD / 1024) as i32,
+            },
+        );
+    }
+    put("jpeg-features-supported", keywords(&["none"]));
+    // Conservative bounds fit within the Windows helper's 130-million-pixel limit.
+    put(
+        "jpeg-x-dimension-supported",
+        IppValue::RangeOfInteger { min: 0, max: 10000 },
+    );
+    put(
+        "jpeg-y-dimension-supported",
+        IppValue::RangeOfInteger { min: 1, max: 10000 },
+    );
     put(
         "pdf-versions-supported",
         keywords(&[
@@ -1235,19 +1747,26 @@ fn printer_attributes(
     put("copies-default", IppValue::Integer(1));
     put("orientation-requested-default", IppValue::Enum(3));
     put(
+        "landscape-orientation-requested-preferred",
+        IppValue::Enum(4),
+    );
+    put(
         "orientation-requested-supported",
         IppValue::Array([3, 4, 5, 6].map(IppValue::Enum).to_vec()),
     );
     put("number-up-default", IppValue::Integer(1));
     put("number-up-supported", IppValue::Integer(1));
-    put("page-ranges-supported", IppValue::Boolean(false));
+    put("page-ranges-supported", IppValue::Boolean(true));
     put("print-quality-default", IppValue::Enum(4));
     put(
         "print-quality-supported",
         IppValue::Array([3, 4, 5].map(IppValue::Enum).to_vec()),
     );
     put("print-scaling-default", IppValue::Keyword("fit".into()));
-    put("print-scaling-supported", keywords(&["fit", "auto"]));
+    put(
+        "print-scaling-supported",
+        keywords(&["auto", "auto-fit", "fit", "fill", "none"]),
+    );
     put(
         "copies-supported",
         IppValue::RangeOfInteger {
@@ -1281,6 +1800,18 @@ fn printer_attributes(
     put("media-type-default", IppValue::Keyword("stationery".into()));
     put("media-type-supported", keywords(&["stationery"]));
     put("media-source-supported", keywords(&["auto"]));
+    // These describe the bridge's automatic driver selection, not physical tray sensors.
+    put(
+        "printer-input-tray",
+        IppValue::OctetString(
+            "type=unknown;mediafeed=0;mediaxfeed=0;maxcapacity=-2;level=-2;status=0;name=auto;"
+                .into(),
+        ),
+    );
+    put("output-bin-default", IppValue::Keyword("auto".into()));
+    put("output-bin-supported", keywords(&["auto"]));
+    put("printer-output-tray", IppValue::OctetString(
+        "type=unknown;maxcapacity=-2;remaining=-2;status=0;name=auto;stackingorder=unknown;pagedelivery=unknown;".into()));
     put("finishings-default", IppValue::Enum(3));
     put("finishings-supported", IppValue::Enum(3));
     put("media-ready", IppValue::Keyword(caps.default_media.clone()));
@@ -1310,6 +1841,8 @@ fn printer_attributes(
                     ),
                 ),
                 ("media-size-name".into(), IppValue::Keyword(name.into())),
+                ("media-source".into(), IppValue::Keyword("auto".into())),
+                ("media-type".into(), IppValue::Keyword("stationery".into())),
                 ("media-top-margin".into(), IppValue::Integer(635)),
                 ("media-bottom-margin".into(), IppValue::Integer(635)),
                 ("media-left-margin".into(), IppValue::Integer(635)),
@@ -1327,7 +1860,12 @@ fn printer_attributes(
     );
     put(
         "media-col-supported",
-        keywords(&["media-size", "media-size-name"]),
+        keywords(&[
+            "media-size",
+            "media-size-name",
+            "media-source",
+            "media-type",
+        ]),
     );
     put(
         "urf-supported",
@@ -1378,8 +1916,11 @@ fn printer_attributes(
             "media-col",
             "print-color-mode",
             "orientation-requested",
+            "page-ranges",
+            "print-quality",
             "print-scaling",
             "job-name",
+            "output-bin",
         ]),
     );
     response
@@ -1417,16 +1958,116 @@ mod tests {
             _ => panic!("Missing job ID"),
         }
     }
+    fn unexpected_backend(
+        _: &str,
+        _: &[u8],
+        _: &str,
+        _: &PrintOptions,
+        _: &AtomicBool,
+    ) -> Result<i32, String> {
+        panic!("receive-only mode must not call the Windows backend")
+    }
+    type RoutedSubmission = (String, Vec<u8>, String, PrintOptions);
+    static ROUTED_SUBMISSIONS: std::sync::OnceLock<Mutex<Option<mpsc::Sender<RoutedSubmission>>>> =
+        std::sync::OnceLock::new();
+    static LEGACY_SUBMISSIONS: std::sync::OnceLock<Mutex<Option<mpsc::Sender<RoutedSubmission>>>> =
+        std::sync::OnceLock::new();
+    fn routed_backend(
+        queue: &str,
+        document: &[u8],
+        format: &str,
+        options: &PrintOptions,
+        _: &AtomicBool,
+    ) -> Result<i32, String> {
+        ROUTED_SUBMISSIONS
+            .get()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .send((
+                queue.to_string(),
+                document.to_vec(),
+                format.to_string(),
+                options.clone(),
+            ))
+            .unwrap();
+        Ok(0)
+    }
+    fn legacy_backend(
+        queue: &str,
+        document: &[u8],
+        format: &str,
+        options: &PrintOptions,
+        _: &AtomicBool,
+    ) -> Result<i32, String> {
+        LEGACY_SUBMISSIONS
+            .get()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .send((
+                queue.to_string(),
+                document.to_vec(),
+                format.to_string(),
+                options.clone(),
+            ))
+            .unwrap();
+        Ok(0)
+    }
     fn http(address: &str, path: &str, body: &[u8], host: &str) -> (u16, Vec<u8>) {
+        http_with_headers(address, path, body, host, &[])
+    }
+
+    fn http_with_headers(
+        address: &str,
+        path: &str,
+        body: &[u8],
+        host: &str,
+        headers: &[(&str, &str)],
+    ) -> (u16, Vec<u8>) {
         let mut socket = TcpStream::connect(address).unwrap();
         socket
             .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();
-        write!(socket, "POST {path} HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/ipp\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).unwrap();
+        let extra_headers = headers
+            .iter()
+            .map(|(name, value)| format!("{name}: {value}\r\n"))
+            .collect::<String>();
+        write!(socket, "POST {path} HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/ipp\r\n{extra_headers}Content-Length: {}\r\nConnection: close\r\n\r\n", body.len()).unwrap();
         socket.write_all(body).unwrap();
         let mut response = Vec::new();
         socket.read_to_end(&mut response).unwrap();
         let boundary = response.windows(4).position(|s| s == b"\r\n\r\n").unwrap();
+        let status = std::str::from_utf8(&response[..boundary])
+            .unwrap()
+            .split_whitespace()
+            .nth(1)
+            .unwrap()
+            .parse()
+            .unwrap();
+        (status, response[boundary + 4..].to_vec())
+    }
+
+    fn http_get(address: &str, path: &str, host: &str) -> (u16, Vec<u8>) {
+        let mut socket = TcpStream::connect(address).unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        write!(
+            socket,
+            "GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"
+        )
+        .unwrap();
+        let mut response = Vec::new();
+        socket.read_to_end(&mut response).unwrap();
+        let boundary = response
+            .windows(4)
+            .position(|bytes| bytes == b"\r\n\r\n")
+            .unwrap();
         let status = std::str::from_utf8(&response[..boundary])
             .unwrap()
             .split_whitespace()
@@ -1485,6 +2126,537 @@ mod tests {
                 Err(e) => panic!("Listener was not released: {e}"),
             }
         }
+    }
+
+    #[test]
+    fn default_print_alias_requires_exactly_one_shared_printer() {
+        let mut server = IppServer::new("127.0.0.1", 0);
+        let first = printer("default alias A");
+        let second = printer("default alias B");
+        server.add_printer(first.clone(), "pc.local.").unwrap();
+        server.start().unwrap();
+        let address = server.address.clone();
+        let canonical = format!("/{}", first.resource_path());
+        let alias_uri = format!("ipp://{address}{DEFAULT_PRINT_PATH}");
+        let request = req(Operation::GetPrinterAttributes, &alias_uri);
+
+        let (status, body) = http(&address, DEFAULT_PRINT_PATH, &request.to_bytes(), &address);
+        assert_eq!(status, 200);
+        let response = IppParser::new(IppReader::new(Cursor::new(body)))
+            .parse()
+            .unwrap();
+        assert_eq!(
+            string_attr(&response, "printer-uri-supported"),
+            Some(format!("ipp://{address}{canonical}").as_str())
+        );
+
+        server.add_printer(second.clone(), "pc.local.").unwrap();
+        assert_eq!(
+            http(&address, DEFAULT_PRINT_PATH, &request.to_bytes(), &address,).0,
+            404
+        );
+        server.remove_printer(&first).unwrap();
+        server.remove_printer(&second).unwrap();
+        assert_eq!(
+            http(&address, DEFAULT_PRINT_PATH, &request.to_bytes(), &address,).0,
+            404
+        );
+    }
+
+    #[test]
+    fn secure_default_alias_keeps_canonical_job_binding_and_validates_uri_authority() {
+        let server = IppServer::new("127.0.0.1", 0);
+        let p = printer("secure default alias");
+        server.add_printer(p.clone(), "pc.local.").unwrap();
+        let path = format!("/{}", p.resource_path());
+        let alias = DEFAULT_PRINT_PATH;
+        let host = "pc.local:631";
+        let alias_uri = format!("ipps://{host}{alias}");
+
+        let response = process_request_at_port_with_alias(
+            &server.shared,
+            &path,
+            Some(alias),
+            host,
+            req(Operation::GetPrinterAttributes, &alias_uri),
+            true,
+            631,
+        );
+        assert_eq!(response.header().operation_or_status, 0);
+        assert_eq!(
+            string_attr(&response, "printer-uri-supported"),
+            Some(format!("ipps://{host}{path}").as_str())
+        );
+
+        for uri in [
+            format!("ipp://{host}{alias}"),
+            format!("ipps://pc.local:8631{alias}"),
+        ] {
+            let rejected = process_request_at_port_with_alias(
+                &server.shared,
+                &path,
+                Some(alias),
+                host,
+                req(Operation::GetPrinterAttributes, &uri),
+                true,
+                631,
+            );
+            assert_eq!(
+                rejected.header().operation_or_status,
+                StatusCode::ClientErrorNotFound as u16
+            );
+        }
+
+        let created = process_request_at_port_with_alias(
+            &server.shared,
+            &path,
+            Some(alias),
+            host,
+            req(Operation::CreateJob, &alias_uri),
+            true,
+            631,
+        );
+        let id = job_id(&created);
+        assert_eq!(
+            string_attr(&created, "job-uri"),
+            Some(format!("ipps://{host}{path}/jobs/{id}").as_str())
+        );
+        let mut lookup = req(Operation::GetJobAttributes, &alias_uri);
+        add(
+            &mut lookup,
+            DelimiterTag::OperationAttributes,
+            "job-uri",
+            IppValue::Uri(format!("ipps://{host}{alias}/jobs/{id}")),
+        );
+        let found = process_request_at_port_with_alias(
+            &server.shared,
+            &path,
+            Some(alias),
+            host,
+            lookup,
+            true,
+            631,
+        );
+        assert_eq!(found.header().operation_or_status, 0);
+        assert_eq!(attr(&found, "job-id"), Some(&IppValue::Integer(id)));
+    }
+
+    #[test]
+    fn gateway_keeps_public_uri_stable_and_pins_created_jobs_to_their_original_target() {
+        let mut target_a = printer("Windows Queue A");
+        target_a.capabilities.color = true;
+        target_a.capabilities.duplex = true;
+        target_a.capabilities.max_copies = 4;
+        let mut target_b = printer("Windows Queue B");
+        target_b.capabilities.max_copies = 1;
+        let public_a = Printer::gateway_from(&target_a);
+        let public_b = Printer::gateway_from(&target_b);
+        let server = IppServer::new("127.0.0.1", 0);
+        server
+            .add_routed_printer(public_a.clone(), &target_a.name, "pc.local.")
+            .unwrap();
+        let (tx, rx) = mpsc::channel();
+        *ROUTED_SUBMISSIONS
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .unwrap() = Some(tx);
+        server.shared.lock().unwrap().backend = routed_backend;
+
+        let path = format!("/{}", public_a.resource_path());
+        assert_eq!(path, "/ipp/print");
+        let host = "127.0.0.1:631";
+        let uri = format!("ipp://{host}{path}");
+        let before = process(
+            &server.shared,
+            &path,
+            host,
+            req(Operation::GetPrinterAttributes, &uri),
+        );
+        let before_uri = string_attr(&before, "printer-uri-supported")
+            .unwrap()
+            .to_string();
+        let before_uuid = string_attr(&before, "printer-uuid").unwrap().to_string();
+        assert_eq!(string_attr(&before, "printer-name"), Some("AirPrinter"));
+        assert_eq!(
+            attr(&before, "color-supported"),
+            Some(&IppValue::Boolean(true))
+        );
+
+        let mut create = req(Operation::CreateJob, &uri);
+        for (name, value) in [
+            ("copies", IppValue::Integer(2)),
+            ("sides", IppValue::Keyword("two-sided-long-edge".into())),
+            ("print-color-mode", IppValue::Keyword("color".into())),
+        ] {
+            add(&mut create, DelimiterTag::JobAttributes, name, value);
+        }
+        let created = process(&server.shared, &path, host, create);
+        assert_eq!(
+            created.header().operation_or_status,
+            StatusCode::SuccessfulOk as u16
+        );
+        let created_id = job_id(&created);
+
+        server
+            .update_routed_printer(public_b.clone(), &target_b.name)
+            .unwrap();
+        let after = process(
+            &server.shared,
+            &path,
+            host,
+            req(Operation::GetPrinterAttributes, &uri),
+        );
+        assert_eq!(
+            string_attr(&after, "printer-uri-supported"),
+            Some(before_uri.as_str())
+        );
+        assert_eq!(
+            string_attr(&after, "printer-uuid"),
+            Some(before_uuid.as_str())
+        );
+        assert_eq!(
+            attr(&after, "color-supported"),
+            Some(&IppValue::Boolean(false))
+        );
+
+        let document_a = b"%PDF-target-A";
+        let mut send = req(Operation::SendDocument, &uri);
+        add(
+            &mut send,
+            DelimiterTag::OperationAttributes,
+            "job-id",
+            IppValue::Integer(created_id),
+        );
+        add(
+            &mut send,
+            DelimiterTag::OperationAttributes,
+            "last-document",
+            IppValue::Boolean(true),
+        );
+        add(
+            &mut send,
+            DelimiterTag::OperationAttributes,
+            "document-format",
+            IppValue::MimeMediaType("application/pdf".into()),
+        );
+        *send.payload_mut() = ipp::payload::IppPayload::new(Cursor::new(document_a.to_vec()));
+        assert_eq!(
+            process(&server.shared, &path, host, send)
+                .header()
+                .operation_or_status,
+            StatusCode::SuccessfulOk as u16
+        );
+        let (queue, document, format, options) = rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        assert_eq!(queue, target_a.name);
+        assert_eq!(document, document_a);
+        assert_eq!(format, "application/pdf");
+        assert_eq!(options.copies, 2);
+        assert_eq!(options.sides, "two-sided-long-edge");
+        assert_eq!(options.color_mode, "color");
+
+        let document_b = b"%PDF-target-B";
+        let mut print = req(Operation::PrintJob, &uri);
+        add(
+            &mut print,
+            DelimiterTag::OperationAttributes,
+            "document-format",
+            IppValue::MimeMediaType("application/pdf".into()),
+        );
+        *print.payload_mut() = ipp::payload::IppPayload::new(Cursor::new(document_b.to_vec()));
+        assert_eq!(
+            process(&server.shared, &path, host, print)
+                .header()
+                .operation_or_status,
+            StatusCode::SuccessfulOk as u16
+        );
+        let (queue, document, format, options) = rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        assert_eq!(queue, target_b.name);
+        assert_eq!(document, document_b);
+        assert_eq!(format, "application/pdf");
+        assert_eq!(options.copies, 1);
+        assert_eq!(options.color_mode, "auto");
+        assert!(server
+            .shared
+            .lock()
+            .unwrap()
+            .jobs
+            .values()
+            .all(|job| job.path == "/ipp/print"));
+    }
+
+    #[test]
+    fn gateway_accepts_only_current_physical_legacy_path_over_http() {
+        let target_a = printer("FF Q501h for DocuPrint P115 b");
+        let target_b = printer("Windows Queue B");
+        let public_a = Printer::gateway_from(&target_a);
+        let public_b = Printer::gateway_from(&target_b);
+        let old_path = format!("/{}", target_a.resource_path());
+        let new_path = format!("/{}", target_b.resource_path());
+        let canonical_path = format!("/{}", public_a.resource_path());
+        assert_eq!(old_path, "/ipp/print/0446aacd44605763b86a4d6fa188cd7d");
+        assert_eq!(canonical_path, "/ipp/print");
+
+        let mut server = IppServer::new("127.0.0.1", 0);
+        server
+            .add_routed_printer(public_a.clone(), &target_a.name, "pc.local.")
+            .unwrap();
+        let (tx, rx) = mpsc::channel();
+        *LEGACY_SUBMISSIONS
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .unwrap() = Some(tx);
+        server.shared.lock().unwrap().backend = legacy_backend;
+        server.start().unwrap();
+        let address = server.address.clone();
+
+        let legacy_uri = format!("ipp://{address}{old_path}");
+        let get = req(Operation::GetPrinterAttributes, &legacy_uri);
+        let (status, body) = http(&address, &old_path, &get.to_bytes(), &address);
+        assert_eq!(status, 200);
+        let response = IppParser::new(IppReader::new(Cursor::new(body)))
+            .parse()
+            .unwrap();
+        assert_eq!(
+            string_attr(&response, "printer-uri-supported"),
+            Some(format!("ipp://{address}{canonical_path}").as_str())
+        );
+
+        let wrong_printer_uri = format!("ipp://{address}{new_path}");
+        let wrong_path_request = req(Operation::GetPrinterAttributes, &wrong_printer_uri);
+        assert_eq!(
+            http(
+                &address,
+                &new_path,
+                &wrong_path_request.to_bytes(),
+                &address
+            )
+            .0,
+            404
+        );
+        let unknown_path = "/ipp/print/ffffffffffffffffffffffffffffffff";
+        assert_eq!(
+            http(&address, unknown_path, &get.to_bytes(), &address).0,
+            404
+        );
+
+        let document = b"%PDF-legacy-target-A";
+        let mut print = req(Operation::PrintJob, &legacy_uri);
+        add(
+            &mut print,
+            DelimiterTag::OperationAttributes,
+            "document-format",
+            IppValue::MimeMediaType("application/pdf".into()),
+        );
+        *print.payload_mut() = ipp::payload::IppPayload::new(Cursor::new(document.to_vec()));
+        let mut body = print.to_bytes().to_vec();
+        body.extend(document);
+        let (status, response_body) = http(&address, &old_path, &body, &address);
+        assert_eq!(status, 200);
+        let response = IppParser::new(IppReader::new(Cursor::new(response_body)))
+            .parse()
+            .unwrap();
+        let job_id = job_id(&response);
+        assert_eq!(
+            string_attr(&response, "job-uri"),
+            Some(format!("ipp://{address}{canonical_path}/jobs/{job_id}").as_str())
+        );
+        let (queue, received, format, _) = rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        assert_eq!(queue, target_a.name);
+        assert_eq!(received, document);
+        assert_eq!(format, "application/pdf");
+
+        let mut get_job = req(Operation::GetJobAttributes, &legacy_uri);
+        add(
+            &mut get_job,
+            DelimiterTag::OperationAttributes,
+            "job-id",
+            IppValue::Integer(job_id),
+        );
+        let job_path = format!("{old_path}/jobs/{job_id}");
+        let (status, body) = http(&address, &job_path, &get_job.to_bytes(), &address);
+        assert_eq!(status, 200);
+        let response = IppParser::new(IppReader::new(Cursor::new(body)))
+            .parse()
+            .unwrap();
+        assert_eq!(
+            string_attr(&response, "job-printer-uri"),
+            Some(format!("ipp://{address}{canonical_path}").as_str())
+        );
+        let (resolved_path, was_legacy_alias) = {
+            let state = server.shared.lock().unwrap();
+            resolve_printer_path(&old_path, &state.printers, &state.routes).unwrap()
+        };
+        assert_eq!(resolved_path, canonical_path);
+        assert!(was_legacy_alias);
+
+        server
+            .update_routed_printer(public_b.clone(), &target_b.name)
+            .unwrap();
+        let stale_alias = process_request_at_port_with_alias(
+            &server.shared,
+            &resolved_path,
+            Some(&old_path),
+            &address,
+            req(Operation::GetPrinterAttributes, &legacy_uri),
+            false,
+            address.rsplit_once(':').unwrap().1.parse().unwrap(),
+        );
+        assert_eq!(
+            stale_alias.header().operation_or_status,
+            StatusCode::ClientErrorNotFound as u16
+        );
+        assert_eq!(http(&address, &old_path, &get.to_bytes(), &address).0, 404);
+        let new_uri = format!("ipp://{address}{new_path}");
+        let new_get = req(Operation::GetPrinterAttributes, &new_uri);
+        let (status, body) = http(&address, &new_path, &new_get.to_bytes(), &address);
+        assert_eq!(status, 200);
+        let response = IppParser::new(IppReader::new(Cursor::new(body)))
+            .parse()
+            .unwrap();
+        assert_eq!(
+            string_attr(&response, "printer-uri-supported"),
+            Some(format!("ipp://{address}{canonical_path}").as_str())
+        );
+
+        server.remove_printer(&public_b).unwrap();
+        assert_eq!(
+            http(&address, &new_path, &new_get.to_bytes(), &address).0,
+            404
+        );
+    }
+
+    #[test]
+    fn receive_page_requires_receive_mode_and_exactly_one_shared_printer() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut server = IppServer::new("127.0.0.1", 0);
+        server
+            .set_receive_directory(Some(directory.path().to_path_buf()))
+            .unwrap();
+        server.start().unwrap();
+        let address = server.address.clone();
+        assert_eq!(http_get(&address, "/receive", &address).0, 404);
+
+        let first = printer("browser receiver A");
+        let second = printer("browser receiver B");
+        server.add_printer(first.clone(), "pc.local.").unwrap();
+        let (status, body) = http_get(&address, "/receive", &address);
+        assert_eq!(status, 200);
+        let page = String::from_utf8(body).unwrap();
+        assert!(page.contains("不会打印"));
+        assert!(page.contains(&format!("data-printer-path=\"/{}\"", first.resource_path())));
+
+        server.set_receive_directory(None).unwrap();
+        assert_eq!(http_get(&address, "/receive", &address).0, 404);
+        server
+            .set_receive_directory(Some(directory.path().to_path_buf()))
+            .unwrap();
+        server.add_printer(second, "pc.local.").unwrap();
+        assert_eq!(http_get(&address, "/receive", &address).0, 404);
+    }
+
+    #[test]
+    fn receive_only_marker_rejects_stale_page_in_normal_mode_and_accepts_enabled_mode() {
+        let document = b"%PDF-receive-marker";
+        let mut normal = IppServer::new("127.0.0.1", 0);
+        let normal_printer = printer("normal mode queue");
+        normal
+            .add_printer(normal_printer.clone(), "pc.local.")
+            .unwrap();
+        normal.shared.lock().unwrap().backend = unexpected_backend;
+        normal.start().unwrap();
+        let normal_address = normal.address.clone();
+        let normal_path = format!("/{}", normal_printer.resource_path());
+        let normal_uri = format!("ipp://{normal_address}{normal_path}");
+        let mut normal_request = req(Operation::PrintJob, &normal_uri);
+        add(
+            &mut normal_request,
+            DelimiterTag::OperationAttributes,
+            "document-format",
+            IppValue::MimeMediaType("application/pdf".into()),
+        );
+        *normal_request.payload_mut() =
+            ipp::payload::IppPayload::new(Cursor::new(document.to_vec()));
+        let mut normal_body = Vec::new();
+        normal_request
+            .into_read()
+            .read_to_end(&mut normal_body)
+            .unwrap();
+        assert_eq!(
+            http_with_headers(
+                &normal_address,
+                &normal_path,
+                &normal_body,
+                &normal_address,
+                &[("X-AirPrinter-Receive-Only", "1")],
+            )
+            .0,
+            409
+        );
+        assert!(normal.shared.lock().unwrap().jobs.is_empty());
+
+        let directory = tempfile::tempdir().unwrap();
+        let mut receiver = IppServer::new("127.0.0.1", 0);
+        receiver
+            .set_receive_directory(Some(directory.path().to_path_buf()))
+            .unwrap();
+        let receive_printer = printer("receive mode queue");
+        receiver
+            .add_printer(receive_printer.clone(), "pc.local.")
+            .unwrap();
+        receiver.shared.lock().unwrap().backend = unexpected_backend;
+        receiver.start().unwrap();
+        let address = receiver.address.clone();
+        let path = format!("/{}", receive_printer.resource_path());
+        let uri = format!("ipp://{address}{path}");
+        let mut request = req(Operation::PrintJob, &uri);
+        add(
+            &mut request,
+            DelimiterTag::OperationAttributes,
+            "document-format",
+            IppValue::MimeMediaType("application/pdf".into()),
+        );
+        *request.payload_mut() = ipp::payload::IppPayload::new(Cursor::new(document.to_vec()));
+        let mut body = Vec::new();
+        request.into_read().read_to_end(&mut body).unwrap();
+        assert_eq!(
+            http_with_headers(
+                &address,
+                &path,
+                &body,
+                &address,
+                &[("X-AirPrinter-Receive-Only", "0")],
+            )
+            .0,
+            409
+        );
+        assert!(receiver.shared.lock().unwrap().jobs.is_empty());
+
+        let (status, response_body) = http_with_headers(
+            &address,
+            &path,
+            &body,
+            &address,
+            &[("X-AirPrinter-Receive-Only", "1")],
+        );
+        assert_eq!(status, 200);
+        let response = IppParser::new(IppReader::new(Cursor::new(response_body)))
+            .parse()
+            .unwrap();
+        assert_eq!(
+            response.header().operation_or_status,
+            StatusCode::SuccessfulOk as u16
+        );
+        let id = job_id(&response);
+        let state = receiver.shared.lock().unwrap();
+        let job = state.jobs.get(&id).unwrap();
+        assert_eq!(job.state, 4);
+        assert_eq!(job.reason, "job-hold-until-specified");
+        let files: Vec<_> = std::fs::read_dir(directory.path())
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(files.len(), 1);
+        assert_eq!(std::fs::read(files[0].path()).unwrap(), document);
     }
 
     #[test]
@@ -1570,6 +2742,184 @@ mod tests {
     }
 
     #[test]
+    fn receive_only_create_send_saves_and_holds_without_backend() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut server = IppServer::new("127.0.0.1", 0);
+        server
+            .set_receive_directory(Some(directory.path().to_path_buf()))
+            .unwrap();
+        let p = printer("receive-only queue");
+        server.add_printer(p.clone(), "pc.local.").unwrap();
+        server.shared.lock().unwrap().backend = unexpected_backend;
+        let path = format!("/{}", p.resource_path());
+        let host = "127.0.0.1:631";
+        let uri = format!("ipp://{host}{path}");
+
+        let created = process(&server.shared, &path, host, req(Operation::CreateJob, &uri));
+        let id = job_id(&created);
+        let document = b"%PDF-receive-only";
+        let mut send = req(Operation::SendDocument, &uri);
+        add(
+            &mut send,
+            DelimiterTag::OperationAttributes,
+            "job-id",
+            IppValue::Integer(id),
+        );
+        add(
+            &mut send,
+            DelimiterTag::OperationAttributes,
+            "last-document",
+            IppValue::Boolean(true),
+        );
+        add(
+            &mut send,
+            DelimiterTag::OperationAttributes,
+            "document-format",
+            IppValue::MimeMediaType("application/pdf".into()),
+        );
+        *send.payload_mut() = ipp::payload::IppPayload::new(Cursor::new(document.to_vec()));
+        assert_eq!(
+            process(&server.shared, &path, host, send)
+                .header()
+                .operation_or_status,
+            StatusCode::SuccessfulOk as u16
+        );
+
+        let mut get = req(Operation::GetJobAttributes, &uri);
+        add(
+            &mut get,
+            DelimiterTag::OperationAttributes,
+            "job-id",
+            IppValue::Integer(id),
+        );
+        let response = process(&server.shared, &path, host, get);
+        assert_eq!(attr(&response, "job-state"), Some(&IppValue::Enum(4)));
+        assert_eq!(
+            string_attr(&response, "job-state-reasons"),
+            Some("job-hold-until-specified")
+        );
+        let Some(IppValue::TextWithoutLanguage(message)) = attr(&response, "job-state-message")
+        else {
+            panic!("missing job-state-message")
+        };
+        assert!(message.contains(&format!("Received {} bytes", document.len())));
+        assert!(message.contains("no Windows print submitted"));
+        let files: Vec<_> = std::fs::read_dir(directory.path())
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(files.len(), 1);
+        assert!(files[0]
+            .file_name()
+            .to_string_lossy()
+            .contains(&format!("airprinter-job-{id}-")));
+        assert!(files[0].file_name().to_string_lossy().ends_with(".pdf"));
+        assert_eq!(std::fs::read(files[0].path()).unwrap(), document);
+
+        server
+            .shared
+            .lock()
+            .unwrap()
+            .jobs
+            .get_mut(&id)
+            .unwrap()
+            .created = Instant::now() - Duration::from_secs(120);
+        let print_document = b"%PDF-print-job";
+        let mut print = req(Operation::PrintJob, &uri);
+        add(
+            &mut print,
+            DelimiterTag::OperationAttributes,
+            "document-format",
+            IppValue::MimeMediaType("application/pdf".into()),
+        );
+        *print.payload_mut() = ipp::payload::IppPayload::new(Cursor::new(print_document.to_vec()));
+        let printed = process(&server.shared, &path, host, print);
+        let print_id = job_id(&printed);
+        let mut get = req(Operation::GetJobAttributes, &uri);
+        add(
+            &mut get,
+            DelimiterTag::OperationAttributes,
+            "job-id",
+            IppValue::Integer(print_id),
+        );
+        let response = process(&server.shared, &path, host, get);
+        assert_eq!(attr(&response, "job-state"), Some(&IppValue::Enum(4)));
+        let mut get = req(Operation::GetJobAttributes, &uri);
+        add(
+            &mut get,
+            DelimiterTag::OperationAttributes,
+            "job-id",
+            IppValue::Integer(id),
+        );
+        assert_eq!(
+            attr(&process(&server.shared, &path, host, get), "job-state"),
+            Some(&IppValue::Enum(4)),
+            "received documents remain held past the incoming-document timeout"
+        );
+        let files: Vec<_> = std::fs::read_dir(directory.path())
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(files.len(), 2);
+        let saved_print = files
+            .iter()
+            .find(|file| {
+                file.file_name()
+                    .to_string_lossy()
+                    .contains(&format!("airprinter-job-{print_id}-"))
+            })
+            .unwrap();
+        assert_eq!(std::fs::read(saved_print.path()).unwrap(), print_document);
+    }
+
+    #[test]
+    fn bonjour_reply_uses_routed_ipv4_with_explicit_port() {
+        let peer = "127.0.0.1:50123".parse().unwrap();
+        let authority = response_authority(Some(peer), "pc.local", 631, false);
+        assert_eq!(authority, "127.0.0.1:631");
+        assert_eq!(
+            response_authority(Some(peer), "PC.LOCAL.:8631", 8631, true),
+            "PC.LOCAL.:8631"
+        );
+        assert_eq!(
+            response_authority(None, "pc.local", 631, false),
+            "pc.local:631"
+        );
+        let server = IppServer::new("127.0.0.1", 0);
+        let p = printer("Bonjour queue");
+        server.add_printer(p.clone(), "pc.local.").unwrap();
+        let path = format!("/{}", p.resource_path());
+        let incoming = format!("ipp://pc.local{path}");
+        let mut query = req(Operation::GetPrinterAttributes, &incoming);
+        add(
+            &mut query,
+            DelimiterTag::OperationAttributes,
+            "requested-attributes",
+            keywords(&["printer-state-reasons"]),
+        );
+        let response = process(&server.shared, &path, &authority, query);
+        assert_eq!(response.header().operation_or_status, 0);
+        assert_eq!(
+            string_attr(&response, "printer-uri-supported"),
+            Some(format!("ipp://127.0.0.1:631{path}").as_str())
+        );
+        assert_eq!(
+            attr(&response, "uri-security-supported"),
+            Some(&keywords(&["none"]))
+        );
+        assert!(attr(&response, "printer-name").is_none());
+        let created = process(
+            &server.shared,
+            &path,
+            &authority,
+            req(Operation::CreateJob, &incoming),
+        );
+        assert!(string_attr(&created, "job-uri")
+            .unwrap()
+            .starts_with("ipp://127.0.0.1:631/"));
+    }
+
+    #[test]
     fn ipp_uris_may_omit_the_default_631_port() {
         assert!(valid_host("pc.local", "pc.local.", 631));
         assert!(valid_host("127.0.0.1", "pc.local.", 631));
@@ -1622,6 +2972,38 @@ mod tests {
         let result = process(&server.shared, &path, "127.0.0.1", lookup);
         assert_eq!(attr(&result, "job-state"), Some(&IppValue::Enum(4)));
         assert!(!valid_ipp_authority("127.0.0.1", "pc.local.", 8631));
+    }
+
+    #[test]
+    fn windows_computer_local_name_is_allowed_with_port_and_scheme_checks() {
+        assert!(is_local_hostname(
+            "LicherPC.local.",
+            "airprinter.local.",
+            Some("LICHERPC")
+        ));
+        assert!(is_local_hostname(
+            "LICHERPC.LOCAL",
+            "airprinter.local",
+            Some("LicherPC.local.")
+        ));
+        assert!(!is_local_hostname(
+            "other.local",
+            "airprinter.local",
+            Some("LicherPC")
+        ));
+        assert!(valid_host("LicherPC.local:631", "airprinter.local.", 631));
+        assert!(valid_ipp_authority(
+            "LicherPC.local:631",
+            "airprinter.local.",
+            631
+        ));
+        assert!(!valid_host("other.local:631", "airprinter.local.", 631));
+        assert!(!valid_host("LicherPC.local:8631", "airprinter.local.", 631));
+        assert!(!valid_ipp_authority(
+            "LicherPC.local:8631",
+            "airprinter.local.",
+            631
+        ));
     }
 
     #[test]
@@ -1736,6 +3118,206 @@ mod tests {
     }
 
     #[test]
+    fn created_job_preserves_print_intent_when_document_arrives() {
+        static RECEIVED: std::sync::OnceLock<Mutex<Option<mpsc::Sender<PrintOptions>>>> =
+            std::sync::OnceLock::new();
+        fn backend(
+            _: &str,
+            _: &[u8],
+            _: &str,
+            opts: &PrintOptions,
+            _: &AtomicBool,
+        ) -> Result<i32, String> {
+            RECEIVED
+                .get()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .send(opts.clone())
+                .unwrap();
+            Ok(0)
+        }
+        let (tx, rx) = mpsc::channel();
+        *RECEIVED.get_or_init(|| Mutex::new(None)).lock().unwrap() = Some(tx);
+        let server = IppServer::new("127.0.0.1", 0);
+        let mut p = printer("selected USB queue");
+        p.capabilities.max_copies = 5;
+        p.capabilities.color = true;
+        p.capabilities.duplex = true;
+        server.add_printer(p.clone(), "pc.local.").unwrap();
+        server.shared.lock().unwrap().backend = backend;
+        let path = format!("/{}", p.resource_path());
+        let host = "127.0.0.1:631";
+        let uri = format!("ipp://{host}{path}");
+        let mut create = req(Operation::CreateJob, &uri);
+        for (name, value) in [
+            (
+                "job-name",
+                IppValue::NameWithLanguage {
+                    language: "zh".into(),
+                    name: "合同".into(),
+                },
+            ),
+            (
+                "page-ranges",
+                IppValue::Array(vec![
+                    IppValue::RangeOfInteger { min: 2, max: 3 },
+                    IppValue::RangeOfInteger { min: 5, max: 5 },
+                ]),
+            ),
+            ("copies", IppValue::Integer(2)),
+            ("print-quality", IppValue::Enum(5)),
+            ("orientation-requested", IppValue::Enum(4)),
+            ("sides", IppValue::Keyword("two-sided-long-edge".into())),
+            ("print-color-mode", IppValue::Keyword("monochrome".into())),
+            ("print-scaling", IppValue::Keyword("none".into())),
+        ] {
+            add(&mut create, DelimiterTag::JobAttributes, name, value);
+        }
+        let created = process(&server.shared, &path, host, create);
+        assert_eq!(created.header().operation_or_status, 0);
+        assert_eq!(string_attr(&created, "job-name"), Some("合同"));
+        let mut send = req(Operation::SendDocument, &uri);
+        add(
+            &mut send,
+            DelimiterTag::OperationAttributes,
+            "job-id",
+            IppValue::Integer(job_id(&created)),
+        );
+        add(
+            &mut send,
+            DelimiterTag::OperationAttributes,
+            "last-document",
+            IppValue::Boolean(true),
+        );
+        *send.payload_mut() =
+            ipp::payload::IppPayload::new(Cursor::new(b"%PDF-simulated".to_vec()));
+        assert_eq!(
+            process(&server.shared, &path, host, send)
+                .header()
+                .operation_or_status,
+            0
+        );
+        let received = rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        assert_eq!(received.page_ranges, vec![(2, 3), (5, 5)]);
+        assert_eq!(received.job_name, "合同");
+        assert_eq!(
+            (received.copies, received.quality, received.orientation),
+            (2, 5, 4)
+        );
+        assert_eq!(received.sides, "two-sided-long-edge");
+        assert_eq!(received.color_mode, "monochrome");
+        assert_eq!(received.scaling, "none");
+        for ranges in [
+            vec![IppValue::RangeOfInteger { min: 0, max: 2 }],
+            vec![IppValue::RangeOfInteger { min: 3, max: 2 }],
+            vec![
+                IppValue::RangeOfInteger { min: 1, max: 3 },
+                IppValue::RangeOfInteger { min: 3, max: 4 },
+            ],
+        ] {
+            let mut validation = req(Operation::ValidateJob, &uri);
+            add(
+                &mut validation,
+                DelimiterTag::JobAttributes,
+                "page-ranges",
+                IppValue::Array(ranges),
+            );
+            assert_eq!(
+                process(&server.shared, &path, host, validation)
+                    .header()
+                    .operation_or_status,
+                StatusCode::ClientErrorBadRequest as u16
+            );
+        }
+    }
+
+    #[test]
+    fn apple_queries_get_format_limits_and_consistent_auto_trays() {
+        let server = IppServer::new("127.0.0.1", 0);
+        let p = printer("USB queue");
+        server.add_printer(p.clone(), "pc.local.").unwrap();
+        let path = format!("/{}", p.resource_path());
+        let host = "127.0.0.1:631";
+        let uri = format!("ipp://{host}{path}");
+        let requested = [
+            "printer-state-reasons",
+            "media-source-supported",
+            "printer-input-tray",
+            "pdf-k-octets-supported",
+            "jpeg-features-supported",
+            "jpeg-k-octets-supported",
+            "jpeg-x-dimension-supported",
+            "jpeg-y-dimension-supported",
+            "media-col-ready",
+            "media-col-supported",
+            "output-bin-default",
+            "output-bin-supported",
+            "printer-output-tray",
+        ];
+        let mut request = req(Operation::GetPrinterAttributes, &uri);
+        add(
+            &mut request,
+            DelimiterTag::OperationAttributes,
+            "requested-attributes",
+            keywords(&requested),
+        );
+        let response = process(&server.shared, &path, host, request);
+        // Check the serialized response, including nested collections and octet-string tags.
+        let response = IppParser::new(IppReader::new(Cursor::new(response.to_bytes())))
+            .parse()
+            .unwrap();
+        assert_eq!(response.header().operation_or_status, 0);
+        for name in requested {
+            assert!(attr(&response, name).is_some(), "Missing {name}");
+        }
+        assert_eq!(
+            attr(&response, "pdf-k-octets-supported"),
+            Some(&IppValue::RangeOfInteger { min: 0, max: 65536 })
+        );
+        assert_eq!(
+            attr(&response, "jpeg-y-dimension-supported"),
+            Some(&IppValue::RangeOfInteger { min: 1, max: 10000 })
+        );
+        let Some(IppValue::OctetString(tray)) = attr(&response, "printer-input-tray") else {
+            panic!("Wrong tray value tag")
+        };
+        assert!(tray.contains("name=auto;"));
+        let Some(IppValue::Collection(media)) = attr(&response, "media-col-ready") else {
+            panic!("Missing ready media")
+        };
+        assert_eq!(
+            media.get("media-source"),
+            Some(&IppValue::Keyword("auto".into()))
+        );
+        assert_eq!(
+            media.get("media-type"),
+            Some(&IppValue::Keyword("stationery".into()))
+        );
+        let mut validate = req(Operation::ValidateJob, &uri);
+        add(
+            &mut validate,
+            DelimiterTag::JobAttributes,
+            "media-col",
+            IppValue::Collection(media.clone()),
+        );
+        add(
+            &mut validate,
+            DelimiterTag::JobAttributes,
+            "output-bin",
+            IppValue::Keyword("auto".into()),
+        );
+        assert_eq!(
+            process(&server.shared, &path, host, validate)
+                .header()
+                .operation_or_status,
+            0
+        );
+    }
+
+    #[test]
     fn printer_attributes_use_protocol_names_and_color_default() {
         let server = IppServer::new("127.0.0.1", 0);
         let mut p = printer("color queue");
@@ -1760,6 +3342,10 @@ mod tests {
             Some("auto")
         );
         assert!(attr(&response, "which-jobs-supported").is_some());
+        assert_eq!(
+            attr(&response, "page-ranges-supported"),
+            Some(&IppValue::Boolean(true))
+        );
         assert_eq!(
             attr(&response, "printer-make-and-model"),
             Some(&IppValue::TextWithoutLanguage(p.name.clone()))
@@ -1850,11 +3436,14 @@ mod tests {
         let mut server = IppServer::new("127.0.0.1", 0);
         let mut p = printer("Microsoft Print to PDF");
         p.capabilities.color = true;
-        server.add_printer(p.clone(), "simulation.local.").unwrap();
+        let public_printer = Printer::gateway_from(&p);
+        server
+            .add_routed_printer(public_printer.clone(), &p.name, "simulation.local.")
+            .unwrap();
         server.shared.lock().unwrap().backend = print_job::submit_test_pdf;
         server.start().unwrap();
         let address = server.address.clone();
-        let path = format!("/{}", p.resource_path());
+        let path = format!("/{}", public_printer.resource_path());
         let uri = format!("ipp://{address}{path}");
         let mut data = b"UNIRAST\0".to_vec();
         data.extend(1u32.to_be_bytes());

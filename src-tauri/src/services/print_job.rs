@@ -12,6 +12,10 @@ pub const FORMATS: &[&str] = &[
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PrintOptions {
+    pub job_name: String,
+    pub page_ranges: Vec<(i32, i32)>,
+    pub scaling: String,
+    pub fidelity: bool,
     pub copies: i32,
     pub quality: i32,
     pub sides: String,
@@ -26,6 +30,10 @@ pub struct PrintOptions {
 impl Default for PrintOptions {
     fn default() -> Self {
         Self {
+            job_name: "AirPrint document".into(),
+            page_ranges: Vec::new(),
+            scaling: "fit".into(),
+            fidelity: false,
             copies: 1,
             quality: 4,
             sides: "one-sided".into(),
@@ -124,7 +132,8 @@ fn submit_windows(
     let body = serde_json::json!({
         "printer": printer, "format": format, "input": input, "directory": directory.path(),
         "pages": pages, "cancel": cancel_path, "spool_id": id_path, "output": output,
-        "name": format!("AirPrinter {}", directory.path().file_name().unwrap().to_string_lossy()),
+        "name": options.job_name, "page_ranges": options.page_ranges,
+        "scaling": options.scaling, "fidelity": options.fidelity,
         "copies": options.copies, "quality": options.quality, "sides": options.sides, "color_mode": options.color_mode, "media": options.media,
         "orientation": options.orientation,
         "paper_kind": options.paper_kind, "paper_width": options.paper_width, "paper_height": options.paper_height,

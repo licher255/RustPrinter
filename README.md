@@ -2,14 +2,16 @@
 
 [查看 HTML 项目文档](doc/index.html)
 
-把 Windows 已安装驱动的 USB、有线网络或已配对打印队列，通过局域网 DNS-SD/mDNS 发布；Apple 客户端使用标准 IPP/HTTP 提交作业，Windows 驱动负责实际输出。
+AirPrinter 在局域网发布一个固定的虚拟打印机入口。用户在 PC 上选择一个已安装驱动的 USB、有线网络或已配对 Windows 队列；iPhone/iPad/Mac 选择 AirPrinter 后，作业由 Windows 驱动投递到当前选定的队列。
 
 ## 使用
 
 1. 在 Windows 安装打印机驱动，并确认本机可以正常打印。
-2. 启动 AirPrinter，选择实际打印机，点击“共享”。可同时共享多台队列；选择保存在用户配置目录，重启后自动恢复。
-3. 让 iPhone/iPad/Mac 与 PC 位于可以互通的局域网。在应用的系统打印面板里选择该打印机。
-4. 打印期间保持 PC 和 AirPrinter 运行。“停止共享”会移除对应 IPP 入口并发送 mDNS 注销记录；最后一台停止后释放监听端口。打印机离线时撤回广播，重新上线后恢复已记住的共享选择。
+2. 启动 AirPrinter，在列表中选择一个 Windows 打印目标。应用会自动发布 AirPrinter，无需逐台发布实体队列。
+3. 让 iPhone/iPad/Mac 与 PC 位于可以互通的局域网，在系统打印面板中选择 **AirPrinter**。
+4. 切换 PC 上的目标只影响之后接收的新作业；已经接收的作业继续使用接收时绑定的目标。可用“关闭 AirPrinter”停止虚拟入口。
+
+日常打印只需在手机系统打印面板选择 AirPrinter、设置打印选项并点击打印。PC 自动接收、处理和投递到当前选定的 Windows 队列；无需下载素材、打开查看器或再次确认打印。浏览器测试页仅用于诊断连接，不是日常打印步骤。
 
 PDF/XPS/OneNote/Fax 等需要本地交互的虚拟队列不出现在正式共享列表中。模拟测试会显式使用 Microsoft Print to PDF，自动指定输出文件，不需要保存对话框。
 
@@ -17,22 +19,24 @@ PDF/XPS/OneNote/Fax 等需要本地交互的虚拟队列不出现在正式共享
 
 ```text
 Windows 队列与驱动能力
-  → 每队列独立的 DNS-SD 记录 / IPP URI
+  → 一个固定的 AirPrinter DNS-SD 服务与 /ipp/print 入口
   → IPP Print-Job 或 Create-Job + Send-Document
+  → 接收时绑定当前选定的 Windows 目标
   → PDF / JPEG / URF / PWG Raster 页面渲染
   → 指定 Windows 队列的 GDI / Spooler
   → IPP 查询、取消和作业状态
 ```
 
-- 使用 Rust `mdns-sd` 广播 `_ipp._tcp`、其 `_universal._sub._ipp._tcp` 发现子类型，以及端口为 0 的 `_printer._tcp` 标识服务。无需安装 Apple Bonjour SDK。
-- URI、TXT `rp` 和 Windows 队列一一对应；不会使用默认打印机替代所选队列。
+- 使用 Rust `mdns-sd` 广播单一固定的 AirPrinter 服务：`_ipp._tcp`、其 `_universal._sub._ipp._tcp` 发现子类型，以及端口为 0 的 `_printer._tcp` 标识服务。无需安装 Apple Bonjour SDK。
+- 虚拟 URI 固定为 `/ipp/print`，不随 Windows 目标变化。PC 上切换目标后，新接收作业绑定新队列；已接收作业保留原目标。
 - 遵循 IPP 的默认端口语义：`ipp://` URI 可以省略 631，HTTP `Host` 仍按实际监听端口验证；Bonjour `.local` 名称和本机 IP 都可作为合法目标。
-- 每 30 秒同步 Windows 队列状态与驱动能力。偏好写入用户配置目录的 `shared-printers.json`，不复制待打印文档。
+- 每 30 秒同步 Windows 队列状态与驱动能力。单个 Windows 输出目标的选择保存在用户配置目录，不复制待打印文档。
 - PDF 使用 Windows 自带 `Windows.Data.Pdf`；JPEG 使用 Windows 图像解码；URF/PWG Raster 支持所公布的 sGray8 / sRGB24，经 GDI 静默投递。
 - 支持 Print-Job、Validate-Job、Create-Job、Send-Document（单文档）、Get-Job-Attributes、Get-Jobs、Cancel-Job。
 - 公布驱动实际支持的彩色、双面、份数和纸张尺寸；A4、A5、Letter、Legal 使用标准名称，其余驱动纸型按尺寸生成自定义介质名称。
 - 彩色打印机默认按 Windows 驱动能力输出彩色；IPP 的 `which-jobs-supported` 与 `multiple-operation-timeout` 属性使用规范名称，DNS-SD TXT 保持在建议的 400 字节以内。
-- 支持横竖方向，页面按可打印区域等比缩放；不宣称无边距、装订、任意页码范围或任意多文档作业能力。
+- 支持横竖方向、连续或不连续的页码范围，以及适合页面、填满、原始尺寸和自动缩放；页码按收到的文档从 1 开始编号。PDF 只渲染所选页面，JPEG/URF/PWG Raster 按页选择；不宣称无边距、装订或多文档作业能力。
+- 手机提交的作业名称及份数、双面、彩色、纸张、质量、方向、页码和缩放设置进入同一后台打印流程；Create-Job 中的设置在 Send-Document 到达时保留。原始尺寸或填满模式超出可打印区域的部分会被裁切，非法页码范围或驱动不支持的选项返回错误。
 - 接收作业时返回待处理状态。驱动失败返回 aborted；进入 Windows 队列后跟踪其状态。作业离开 Windows 队列表示后台队列处理结束，不能独立证明纸张已经输出。
 - 文档暂存于随机临时目录，提交结束或失败后清理；不打开浏览器、默认查看器或打印对话框，也不更改 Windows 默认打印机。
 
@@ -72,12 +76,21 @@ pnpm tauri build
 
 ## 可重复验证
 
+定位手机文件传输时，可先启动仅接收诊断模式：`src-tauri/target/debug/airprinter.exe --receive-only "E:\Tauri-Rust-Printer\src-tauri\target\received-documents"`（目录必须为绝对路径）。已接收的文档保存在该目录，作业标为待处理，暂不调用打印驱动。退出后正常启动恢复自动打印。此模式用于接收验收，不是日常使用步骤。
+
+仅接收诊断模式可从手机访问 `http://<PC局域网地址>:631/receive`（或同端口 HTTPS），上传一个测试文档并将作业保存为待处理状态，不调用打印驱动。该入口用于诊断接收链路，不是日常打印流程。普通模式会自动处理并投递作业，无需用户下载文档、打开查看器或再次手动打印。
+
+Windows 管理员 PowerShell 中运行 `scripts/capture_print_chain.ps1 -OutputDirectory "E:\Tauri-Rust-Printer"` 可进行90秒限定抓包，同步记录手机631/8631流量、本子网mDNS、打印/USBMon事件及队列状态；产物在 `target/print-capture/`。用 `python -X utf8 scripts/analyze_print_capture.py <network.pcapng>` 分析原始报文。USBMon产物是驱动事件而非原始USB数据包。抓包可能含文档数据，只在本地保存并已从Git忽略。
+
 ```powershell
-# 无实体打印，协议/解析/路由测试
+# 协议、解析与路由测试（当前验证：34 项通过，4 项忽略）
 cargo test --manifest-path src-tauri/Cargo.toml --locked
 python scripts/diagnose_mdns.py --self-test
+powershell.exe -NoProfile -File scripts/check_print_options.ps1
+# Windows 自动选页集成测试：只向 Microsoft Print to PDF 输出，无保存对话框
+powershell.exe -NoProfile -File scripts/check_print_options.ps1 -Simulate
 
-# 本地模拟：短暂发布明确命名的模拟队列，使用 Microsoft Print to PDF 生成文件
+# 本地模拟：使用 Microsoft Print to PDF 生成文件
 cargo test --manifest-path src-tauri/Cargo.toml --locked -- --include-ignored --nocapture
 
 # JS 虚拟客户端与主机专用虚拟网卡：不会提交 Print-Job
@@ -90,7 +103,9 @@ python scripts/diagnose_mdns.py --seconds 8
 python scripts/diagnose_mdns.py --interface 192.168.1.10 --seconds 8
 ```
 
-`http_to_windows_pdf_end_to_end` 通过真正的 HTTP IPP 请求提交 URF，查询作业直到 Windows 队列结束，在 `src-tauri/target/airprint-simulation/` 留下 PDF 供检查。`windows_raster_spool_smoke` 检查四种文档格式，包括 PDF 再渲染打印。mDNS 测试发布两个临时模拟实例，验证解析和注销。
+当前验证包括 34 项 Rust 库测试通过、4 项忽略，`cargo check --all-targets` 通过，以及从固定 HTTP 虚拟入口提交作业并单独输出到 Microsoft Print to PDF 的测试通过。该验证不代表真实手机原生提交成功；真实 Apple 设备提交和实体打印机出纸仍未验证。
+
+`http_to_windows_pdf_end_to_end` 通过 HTTP IPP 虚拟入口提交 URF，查询作业直到 Windows 队列结束，在 `src-tauri/target/airprint-simulation/` 留下 PDF 供检查。`windows_raster_spool_smoke` 检查四种文档格式，包括 PDF 再渲染打印。mDNS 测试验证解析和注销。
 
 JS 脚本需要一块主机专用虚拟网卡，参数应替换为该网卡的 IPv4 地址。Rust 模拟打印机把 IPP 监听及 mDNS 限定在该接口；Node.js 在另一进程中模拟 DNS-SD 与 IPP 客户端。这台电脑的 Hyper-V 默认交换机不会将 mDNS 多播回送本机，因此脚本会明确标记 DNS-SD 部分使用隔离的 UDP 回环模拟响应。IPP 属性查询、参数校验与 Host 拒绝仍访问真实 Rust 后端。它不会向虚构队列提交打印作业。
 

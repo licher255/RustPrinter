@@ -82,3 +82,60 @@
 - 按 RFC 3510 与 RFC 8010，IPP URI 可省略默认 631；RFC 8010 的直接请求示例仍以 `Host: printer.example.com:631` 传输。原校验把两者用同一规则处理，合法的无端口 `printer-uri` 会被误判为 404。
 - 现按 URI 默认端口 631 校验 `printer-uri` 和 `job-uri`，HTTP `Host` 仍按连接的实际端口检查；备用端口 8631–8699 的 URI 必须显式包含端口。
 - 覆盖能力查询、Create-Job、按 Job URI 查询，以及 Bonjour `.local` 名称。更新后本地模拟测试 17 passed，0 failed。跨 Apple 设备和实体出纸仍待验收。
+
+## 自动打印与打印意图（2026-10-09）
+
+- 用户反馈：手机可通过 HTTPS 诊断页触发测试页出纸，系统 AirPrint 打印仍失败。诊断页实际先向手机下载 JPEG，再由手机通过 IPP Print-Job 上传；这项反馈支持小 JPEG 上传及指定队列路径可用，不证明系统 AirPrint 的能力协商、PDF/URF 或大文件上传已通过。
+- 仓库现有 `test.txt` 只有失败实例的 DNS-SD 属性，没有该次失败的请求或 Windows 驱动错误日志；故障根因仍未确认。
+- 日常流程保持手机系统打印面板提交 → PC 自动接收/渲染 → 指定 Windows 队列。临时文件自动清理，不要求下载素材、打开查看器或 PC 再次确认。
+- 修复以前直接拒绝 page-ranges 的缺口，接受正数、升序、不重叠的单段/多段范围；PDF 跳过未选择页的渲染，其他格式按收到的页序选择。如果范围内没有实际页面，不提交空白作业并返回作业错误。
+- 保留有/无语言标签的 job-name，并传给 Windows 队列。新增 print-scaling 的真实执行：fit、fill、none、auto、auto-fit；自动模式在页面大于纸张或要求属性保真时按可打印区域适配，否则保留原始尺寸。PDF 原始尺寸按明确的 300 DPI 渲染分辨率计算。
+- Create-Job 的打印选项在 Send-Document 中继承；增加协议到后端的意图保留测试、非法范围检查，以及 `scripts/check_print_options.ps1` 的页面选择和缩放检查（不访问打印机）。
+- 接收日志包含所选选项，Windows 投递失败记录具体错误；没有将此次修改描述为已修复手机系统 AirPrint 失败，仍需实际设备验证。
+- 本轮验证：库测试 18 passed / 0 failed / 4 ignored；适配器参数测试 1 passed。另单独运行四格式 Windows 虚拟打印及本地 HTTP→Windows→作业完成测试，各 1 passed。`check_print_options.ps1 -Simulate` 验证三页输出和选择第 2 页后的一页 PDF，未出现保存或打印对话框；默认模式验证页码及全部公布的缩放计算。
+- Windows 调试信息链接耗时较长，验证使用 `target/test-rustc-no-pdb.cmd` 临时包装编译器追加 `/DEBUG:NONE`；仅用于本机测试/构建，未改变项目依赖和 Cargo 配置。上述结果没有使用实体打印机或实际 Apple 系统打印客户端。
+- 更新后的可运行程序已构建：`cargo build --bin airprinter --features custom-protocol --locked --offline`（同一临时包装脚本）。输出 `src-tauri/target/debug/airprinter.exe`，包含现有前端与本轮自动处理逻辑；未启动程序或修改共享、防火墙设置。
+
+## 手机系统打印失败的实机诊断（2026-10-10）
+
+- 用户再次从手机系统打印面板尝试，仍未成功。当前共享为 USB005 上的 `FF Q501h for DocuPrint P115 b`；检查时 Windows 队列为空，当前 IPP 作业列表也为空。此状态提示失败可能发生在作业接受之前，但缺少历史请求记录，不能确定根因。
+- 新增自动诊断：启动后将请求路径、对端、HTTP 头中的传输信息、接收字节数、IPP 操作/返回码、URI 校验失败、解析错误和 Windows 投递/状态错误写入应用配置目录 `print-diagnostics.jsonl`。只记录元数据及错误，不保存文档内容或 TLS 私钥；每份日志限制约 2 MiB，保留一份轮换记录。
+- 新增记录格式与容量轮换测试；本轮库测试 19 passed / 0 failed / 4 ignored，内嵌前端的程序构建通过。已启动诊断版本，恢复已有共享选择，HTTP 631 / HTTPS 8631 在线。下一次手机提交将由电脑自动记录，仍待实机结果确认。
+- 随后的实机记录：手机通过 HTTP、Transfer-Encoding: chunked 成功提交多次 Get-Printer-Attributes（0x000b），均返回 successful-ok；没有 Print-Job/Create-Job/Send-Document，文件尚未上传。排查阶段因此缩小到打印前能力协商，不能再将这一现象笼统归因于文件上传或 Windows 打印驱动。
+- 对照 PWG 5100.13-2023 第 44–46、56–61 页，补齐声明 PDF/JPEG 后条件必需的大小/特性/尺寸属性；给自动驱动选择提供对应的输入/输出纸盒元数据及 media-col 的 source/type。容量及纸张余量未知，用规范的 unknown/-2 表示，不虚构实体传感器读数。output-bin 只接受 auto；其他值返回不支持。
+- 已增加手机查询字段的序列化回放测试，并验证公布的纸张集合能通过 Validate-Job；库测试 20 passed / 0 failed / 4 ignored。这些修复针对可验证的能力属性缺口，是否解决实机停止在查询阶段仍待复测。
+- 用户确认来源为文件 App 的 PDF，无手机报错。补齐属性后的复测仍停在查询阶段；临时恢复旧版完整能力响应也未使手机提交文件，已撤回完整响应实验。
+- 对比 699e9e7 又发现 URI 行为差异：旧版收到 `.local` Host 会改用本机 IPv4 返回 printer-uri；新版本直接回显 `.local` Host 且可能省略默认端口。已恢复 HTTP 的 IPv4 兼容路径：用手机对端的 UDP 路由选择得到本机源地址（只 connect，不发送数据），避免选到虚拟网卡，返回明确端口。IPPS 保留 TLS 证书匹配的 DNS 主机名。
+- 手机实际查询列表不请求 printer-uri，因此能力响应同时附带规范化的提交 URI 及对应的 authentication/security 属性，其余仍按 requested-attributes 筛选。新增路由地址、端口、Bonjour 请求与作业 URI 回归测试：21 passed / 0 failed / 4 ignored。此差异是进一步定位线索，实机打印结果仍待确认。
+
+## 原始抓包与仅接收阶段（2026-10-10）
+
+- 按用户要求由 GPT-6 Luna 编写抓包、分析和仅接收代码，主代理审阅并验收。捕获产物在 `target/print-capture/20261010-182646/`，包含原始网络 ETL、PCAPNG、跨层包文本、PrintService/USBMon ETW、175 次队列采样与应用记录；产物目录已加入 Git 忽略。
+- 抓包实际从 18:26:47 开始，采样及停止处理至 18:28:23。可解码的明文请求为 Get-Printer-Attributes，可解码响应为 HTTP 200 / IPP successful-ok。部分 TCP 流有捕获缺口，不能把未配对的请求、响应当作同一交易。所有队列采样为空；两份打印 ETW 解码后只有会话头，无打印/USBMon事件。USBMon是驱动事件跟踪，不是原始 USB payload。
+- PktMon 的 1153 条跨层 drop 记录里，1148 条与 UDP 5353 有关；5 条 TCP 631 分别是 duplicate segment/FIN-WAIT2。它们不是1153次打印TCP丢包，也不是捕获ETW事件丢失。
+- 关键原始报文：18:27:39 手机 `192.168.3.197:60841` 向 `192.168.3.249:631` 发送完整 TLS ClientHello（record header `16030105e9`、记录长1513字节）；无 SNI，支持 TLS1.3/1.2。服务器只有TCP ACK，未见 ServerHello/证书/TLS应用数据；手机随后 FIN。当前631为明文HTTP，TLS只在8631。用户确认捕获期间只操作文件 App 的 PDF 系统打印，没有打开浏览器。此时不能判断证书信任是否存在后续问题，因为尚未到证书阶段。
+- 阶段目标改为先收到文件。新增本地启动参数 `--receive-only <absolute-directory>`，接收文件后保存完整payload，标记 held（诊断保存，不代表已打印），不调用 Windows 后端；正常启动的自动打印逻辑保持原样。协议回归22 passed / 0 failed / 4 ignored。
+- 本机对照：仅接收版本使用 chunked HTTP/IPP 接收5003字节的本机生成PDF，保存内容逐字节一致，SHA256 `523a225391931e7c8d18ae6e6548084e3b97e0f4a81edf5867328b0fbf457be6`，spool_id为空，实体Windows队列无新增作业。这项结果是本机对照，不是手机文件接收成功。
+- 依据 TLS ClientHello 发往631的原始证据，增加同端口 HTTP/TLS 接入层：按首字节分流到回环HTTP后端或现有TLS后端，不落盘转发内容；上限16连接，设置超时，并通过短生命周期映射恢复真实手机地址及公开端口。协议/代理回环及实际本机HTTPS631上传均通过。
+- 修复后第二轮捕获 `target/print-capture/20261010-184317/` 显示 TLS1.3 握手及加密请求，应用明确记录 `secure=true POST /ipp/print` 被404拒绝。增加仅单共享队列可用的默认路径别名；多队列时仍拒绝，响应和作业继续绑定canonical路径。第三轮 `20261010-184917` 再发现手机使用Host `LicherPC.local`，因此允许当前本机 `COMPUTERNAME.local`，保留陌生主机名及错误端口拒绝。这些修复后系统打印仍只查询能力，没有观察到文档提交；没有将其宣称为系统AirPrint已完全修复。
+- 用户批准先从网页上传验证接收。新增 `/receive`，只在仅接收模式且恰好共享一台队列时开放；使用同一个IPP接收器上传PDF/JPEG，按精确作业ID查询保存结果，不下载素材、不触发实体打印。网页使用 `X-AirPrinter-Receive-Only: 1`，服务端在普通模式拒绝该标记，防止旧网页在重启为打印模式后误打印。
+- **真实手机接收验收通过（19:00:20）**：手机 `192.168.3.197` 从网页提交 `symbols.pdf`，Print-Job文档为 `application/pdf`，261478字节；接收文件 `src-tauri/target/received-documents/airprinter-job-2-I3h75t.pdf` 大小与接收记录一致，Windows PDF API可解析为4页。SHA256为 `AF0440C4A882559C3F1B227F62A3B8FD28044ECA181CD5287431113D9C45A4E4`。作业held、spool_id为空，Windows实体队列没有新增任务。本阶段“先完整收到手机文件”已实现；系统打印面板原生提交与实体输出留待下一阶段。
+
+## 统一虚拟入口与实体队列路由（2026-10-10）
+
+- 按用户要求，由 GPT-6 Luna 实现固定虚拟 AirPrinter，主代理审核与验收。PC 选择一个实际 Windows 输出队列；网络只发布一个虚拟打印机身份，公共路径固定为 `/ipp/print`，实例名和 UUID 不随目标队列切换。无需安装 Windows 虚拟打印驱动。
+- 打印能力来自选定的实际队列。Create-Job/Print-Job 接受时保存实际队列与能力快照；切换后新作业使用新队列，后续 Send-Document 仍使用原作业的队列、打印选项和能力。取消及状态查询也使用作业保存的实际队列。
+- 前端改为单选输出目标。切换通过一次后端请求更新，保存失败不会切换，运行时更新失败恢复原选择；启动时不会在多个旧共享记录中任意选择目标，需重新单选。
+- 普通模式自动接收、渲染并投递 Windows 队列，临时文件自动清理；仅接收诊断模式仍按明确启动参数保存文件且不打印。此前收到的 `symbols.pdf` 不会因正常重启而自动重放。
+- 验证：库测试 33 passed / 0 failed / 4 ignored；前端 TypeScript/Vite 构建和 Rust all-targets 检查通过。单独运行 HTTP 虚拟 `/ipp/print` → 实际 `Microsoft Print to PDF` 测试，Windows spool id 10，IPP 作业最终 completed；输出 `src-tauri/target/airprint-simulation/http-urf-46196.pdf`。目标切换测试覆盖 A/B 队列和 Create-Job 后切换再 Send-Document 的目标保持。
+- 这些结果证明统一入口与 Windows 路由实现可运行。真实手机系统打印面板在新虚拟身份下提交文件，以及 FF Q501h 实体出纸仍需实机验证；网页接收成功不能替代这两项验收。
+- 新版已于 19:23:35 正常启动（无 receive-only 参数），恢复 `FF Q501h for DocuPrint P115 b`。HTTP/HTTPS 631 查询都返回 `printer-name=AirPrinter`、`printer-is-accepting-jobs=true` 和固定 `/ipp/print`，普通模式 `/receive` 为404。只读查询未提交文档。
+- 本机临时端口的单播 DNS-SD 查询未收到响应，改为加入5353多播接收后观察到实际 PTR/SRV/TXT/A：`AirPrinter-b90176c7458058b3`，`rp=ipp/print`，UUID `881a6a07-2eef-55ce-ba76-36b91b572323`；IPP631/IPPS8631使用同一虚拟身份，A记录 `192.168.3.249`。这是实际广播记录证据，手机是否发现及提交仍待用户实测。
+
+## 虚拟入口上线后的旧地址兼容排查（2026-10-10）
+
+- 用户确认已发现 AirPrinter，提交后仍未出纸。19:24–19:26 日志显示手机对 `/ipp/print` 的 TLS能力查询成功，同时持续对 `/ipp/print/0446aacd44605763b86a4d6fa188cd7d` 发起HTTP请求被404拒绝；Windows实体队列没有新增作业，已解析请求仍只有Get-Printer-Attributes。
+- 旧路径后缀与当前 `FF Q501h for DocuPrint P115 b` 队列名的 UUID v5完全一致。这支持手机仍在访问旧队列地址的判断，但不证明404是所有原生提交失败的唯一原因。兼容修复仅针对当前实体目标的精确旧路径，统一返回虚拟入口；不接受任意UUID或其他实体队列。
+- 已完成精确别名兼容：HTTP路由解析及IPP处理读取目标时都检查当前路由，避免两步之间切换导致串队列；旧路径提交和作业查询统一返回 `/ipp/print` 的URI。新增真实HTTP回归覆盖文档/实体目标、错误UUID、未选择队列、切换后的旧地址及停止后的拒绝。
+- 本轮库测试在正常主机权限下为34 passed / 0 failed / 4 ignored。初次沙箱内运行有10项被套接字/临时文件访问限制阻止；直接在正常主机权限下运行同一测试二进制全部通过，没有修改实现或放宽校验来绕过测试。
+- 兼容版于19:31:03启动，正常自动打印模式、目标队列不变。实机只读查询验证精确旧地址在HTTP及HTTPS631均返回HTTP200/IPP successful-ok，响应`printer-name=AirPrinter`，提交URI统一为`/ipp/print`；错误UUID仍为404。真实手机复测结果待确认。

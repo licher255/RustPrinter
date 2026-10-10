@@ -3,6 +3,14 @@ $ErrorActionPreference = 'Stop'
 $job = Get-Content -LiteralPath $env:AIRPRINTER_MANIFEST -Raw -Encoding UTF8 | ConvertFrom-Json
 Add-Type -AssemblyName System.Drawing
 
+function Select-Page([int] $number) {
+    if (@($job.page_ranges).Count -eq 0) { return $true }
+    foreach ($range in $job.page_ranges) {
+        if ($number -ge $range[0] -and $number -le $range[1]) { return $true }
+    }
+    return $false
+}
+
 # All request values are read from JSON, never interpolated into executable code.
 if ($job.format -eq 'application/pdf') {
     Add-Type -AssemblyName System.Runtime.WindowsRuntime
@@ -31,6 +39,7 @@ if ($job.format -eq 'application/pdf') {
     $totalPixels = 0L
     for ($index = 0; $index -lt $pdf.PageCount; $index++) {
         if (Test-Path -LiteralPath $job.cancel) { throw 'Print job canceled' }
+        if (-not (Select-Page ($index + 1))) { continue }
         $page = $pdf.GetPage($index)
         $stream = New-Object Windows.Storage.Streams.InMemoryRandomAccessStream
         try {
@@ -57,7 +66,13 @@ if ($job.format -eq 'application/pdf') {
         }
     }
 }
-else { $pages = @($job.pages) }
+else {
+    $pages = @()
+    for ($index = 0; $index -lt $job.pages.Count; $index++) {
+        if (Select-Page ($index + 1)) { $pages += $job.pages[$index] }
+    }
+}
+if ($pages.Count -eq 0) { throw 'No document pages match the requested page ranges' }
 Add-Type -ReferencedAssemblies System.Drawing -TypeDefinition @'
 using System;
 using System.Drawing;
@@ -89,7 +104,22 @@ public static class AirPrinterNative {
     [DllImport("kernel32.dll")] static extern bool GlobalUnlock(IntPtr handle);
     [DllImport("kernel32.dll")] static extern IntPtr GlobalFree(IntPtr handle);
 
-    public static int Print(string queue, string[] pages, int copies, int quality, string sides, string color, int paperKind, int paperWidth, int paperHeight, int orientation, string name, string cancel, string idFile, string output) {
+    public static RectangleF PageBounds(SizeF image, SizeF area, SizeF sheet, string scaling, bool fidelity) {
+        float scale = 1;
+        if (scaling == "fit" || ((scaling == "auto" || scaling == "auto-fit") &&
+            (fidelity || image.Width > sheet.Width || image.Height > sheet.Height))) {
+            // Advertised media has margins, so automatic scaling uses fit.
+            scale = Math.Min(area.Width / image.Width, area.Height / image.Height);
+        } else if (scaling == "fill") {
+            scale = Math.Max(area.Width / image.Width, area.Height / image.Height);
+        } else if (scaling != "none" && scaling != "auto" && scaling != "auto-fit") {
+            throw new InvalidOperationException("Unsupported print scaling");
+        }
+        float width = image.Width * scale, height = image.Height * scale;
+        return new RectangleF((area.Width - width) / 2, (area.Height - height) / 2, width, height);
+    }
+
+    public static int Print(string queue, string[] pages, int copies, int quality, string sides, string color, int paperKind, int paperWidth, int paperHeight, int orientation, string name, string cancel, string idFile, string output, string format, string scaling, bool fidelity) {
         var settings = new PrinterSettings();
         settings.PrinterName = queue;
         if (!settings.IsValid) throw new InvalidOperationException("Windows printer is unavailable: " + queue);
@@ -133,6 +163,8 @@ public static class AirPrinterNative {
                 if (File.Exists(cancel)) throw new OperationCanceledException();
                 using (var image = Image.FromFile(path)) {
                     if ((long)image.Width * image.Height > 130000000) throw new InvalidOperationException("Image size limit exceeded");
+                    // PDF pages were explicitly rendered at 300 DPI; PNG metadata can differ.
+                    if (format == "application/pdf") ((Bitmap)image).SetResolution(300, 300);
                     if (Array.IndexOf(image.PropertyIdList, 0x0112) >= 0) {
                         int exif = image.GetPropertyItem(0x0112).Value[0];
                         var rotations = new RotateFlipType[] { RotateFlipType.RotateNoneFlipNone, RotateFlipType.RotateNoneFlipNone, RotateFlipType.RotateNoneFlipX, RotateFlipType.Rotate180FlipNone, RotateFlipType.Rotate180FlipX, RotateFlipType.Rotate90FlipX, RotateFlipType.Rotate90FlipNone, RotateFlipType.Rotate270FlipX, RotateFlipType.Rotate270FlipNone };
@@ -142,9 +174,13 @@ public static class AirPrinterNative {
                     if (StartPage(dc) <= 0) throw new Win32Exception();
                     using (var graphics = Graphics.FromHdc(dc)) {
                         graphics.PageUnit = GraphicsUnit.Pixel;
-                        float width = GetDeviceCaps(dc, 8), height = GetDeviceCaps(dc, 10);
-                        float scale = Math.Min(width / image.Width, height / image.Height);
-                        var bounds = new RectangleF((width - image.Width * scale) / 2, (height - image.Height * scale) / 2, image.Width * scale, image.Height * scale);
+                        float dpiX = GetDeviceCaps(dc, 88), dpiY = GetDeviceCaps(dc, 90);
+                        float imageDpiX = image.HorizontalResolution > 0 ? image.HorizontalResolution : 96;
+                        float imageDpiY = image.VerticalResolution > 0 ? image.VerticalResolution : 96;
+                        var bounds = PageBounds(
+                            new SizeF(image.Width * dpiX / imageDpiX, image.Height * dpiY / imageDpiY),
+                            new SizeF(GetDeviceCaps(dc, 8), GetDeviceCaps(dc, 10)),
+                            new SizeF(GetDeviceCaps(dc, 110), GetDeviceCaps(dc, 111)), scaling, fidelity);
                         graphics.DrawImage(image, bounds);
                     }
                     if (EndPage(dc) <= 0) throw new Win32Exception();
@@ -162,5 +198,5 @@ public static class AirPrinterNative {
     }
 }
 '@
-$id = [AirPrinterNative]::Print($job.printer, [string[]]$pages, $job.copies, $job.quality, $job.sides, $job.color_mode, $job.paper_kind, $job.paper_width, $job.paper_height, $job.orientation, $job.name, $job.cancel, $job.spool_id, $job.output)
+$id = [AirPrinterNative]::Print($job.printer, [string[]]$pages, $job.copies, $job.quality, $job.sides, $job.color_mode, $job.paper_kind, $job.paper_width, $job.paper_height, $job.orientation, $job.name, $job.cancel, $job.spool_id, $job.output, $job.format, $job.scaling, $job.fidelity)
 @{ spool_id = $id } | ConvertTo-Json -Compress

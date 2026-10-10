@@ -4,6 +4,7 @@
 use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
+use std::path::PathBuf;
 use tauri::Manager;
 
 use airprinter::services::{AirPrintServer, PrinterDetector};
@@ -16,19 +17,44 @@ use airprinter::commands::{
 };
 
 fn main() {
+    let receive_only_dir = match receive_only_directory() {
+        Ok(directory) => directory,
+        Err(error) => {
+            eprintln!("AirPrinter startup argument error: {error}");
+            std::process::exit(2);
+        }
+    };
     println!("╔══════════════════════════════════════════════════════════╗");
     println!("║              🖨️  AirPrinter 启动中...                    ║");
     println!("╚══════════════════════════════════════════════════════════╝");
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .setup(|app| {
+        .setup(move |app| {
             let config_dir = app.path().app_config_dir()?;
+            if let Err(error) = airprinter::services::diagnostics::init(&config_dir) {
+                eprintln!("[AirPrinter] 初始化打印诊断记录失败: {error}");
+            }
             let preferences = config_dir.join("shared-printers.json");
             let settings_path = config_dir.join("settings.json");
             let settings_store =
                 airprinter::services::SettingsStore::load(settings_path).map_err(std::io::Error::other)?;
             let settings = settings_store.get();
+            let mut airprint_server = AirPrintServer::with_preferences(preferences)
+                .map_err(std::io::Error::other)?;
+            if let Some(directory) = &receive_only_dir {
+                std::fs::create_dir_all(directory)?;
+                if !directory.is_dir() {
+                    return Err(std::io::Error::other("receive-only path is not a directory").into());
+                }
+                airprinter::services::diagnostics::record(&format!(
+                    "[AirPrinter] receive-only mode: saving validated documents to {}",
+                    directory.display()
+                ));
+            }
+            airprint_server
+                .set_receive_directory(receive_only_dir.clone())
+                .map_err(std::io::Error::other)?;
 
             // 恢复上次选择的语言
             rust_i18n::set_locale(&settings.language);
@@ -42,9 +68,7 @@ fn main() {
 
             app.manage(AppState {
                 detector: Mutex::new(PrinterDetector::new()),
-                server: Mutex::new(
-                    AirPrintServer::with_preferences(preferences).map_err(std::io::Error::other)?,
-                ),
+                server: Mutex::new(airprint_server),
                 settings: Mutex::new(settings_store),
             });
 
@@ -118,4 +142,23 @@ fn main() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+fn receive_only_directory() -> Result<Option<PathBuf>, String> {
+    let mut args = std::env::args_os().skip(1);
+    let mut directory = None;
+    while let Some(arg) = args.next() {
+        if arg == "--receive-only" {
+            if directory.is_some() {
+                return Err("--receive-only may be specified only once".into());
+            }
+            let value = args.next().ok_or("--receive-only requires an absolute directory path")?;
+            let path = PathBuf::from(value);
+            if !path.is_absolute() {
+                return Err("--receive-only requires an absolute directory path".into());
+            }
+            directory = Some(path);
+        }
+    }
+    Ok(directory)
 }

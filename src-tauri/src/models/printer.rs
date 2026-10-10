@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 // Bump when an incompatible discovery/IPP profile change requires clients to refresh cached state.
-pub const DISCOVERY_REVISION: u8 = 2;
+pub const DISCOVERY_REVISION: u8 = 7;
+pub const GATEWAY_PRINTER_ID: &str = "airprinter-gateway";
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Printer {
@@ -74,8 +75,20 @@ impl PrinterStatus {
 }
 
 impl Printer {
+    pub fn gateway_from(target: &Self) -> Self {
+        Self {
+            name: "AirPrinter".into(),
+            id: GATEWAY_PRINTER_ID.into(),
+            status: target.status.clone(),
+            capabilities: target.capabilities.clone(),
+        }
+    }
+
     /// A bounded, stable URI even when a Windows queue has a long Unicode name.
     pub fn resource_path(&self) -> String {
+        if self.id == GATEWAY_PRINTER_ID {
+            return "ipp/print".into();
+        }
         format!(
             "ipp/print/{}",
             uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, self.id.as_bytes()).simple()
@@ -115,5 +128,36 @@ mod tests {
         assert_eq!(printer.resource_path().len(), 42);
         assert!(printer.resource_path().is_ascii());
         assert_eq!(printer.clone().resource_path(), printer.resource_path());
+    }
+
+    #[test]
+    fn gateway_identity_and_uri_are_stable_while_capabilities_follow_target() {
+        let mut first = Printer {
+            name: "Office A".into(),
+            id: "queue-a".into(),
+            status: PrinterStatus::Online,
+            capabilities: PrinterCapabilities::default(),
+        };
+        first.capabilities.color = true;
+        let mut second = Printer {
+            name: "Office B".into(),
+            id: "queue-b".into(),
+            status: PrinterStatus::Busy,
+            capabilities: PrinterCapabilities::default(),
+        };
+        second.capabilities.duplex = true;
+
+        let gateway_a = Printer::gateway_from(&first);
+        let gateway_b = Printer::gateway_from(&second);
+        assert_eq!(gateway_a.id, GATEWAY_PRINTER_ID);
+        assert_eq!(gateway_a.name, "AirPrinter");
+        assert_eq!(gateway_a.resource_path(), "ipp/print");
+        assert_eq!(gateway_a.resource_path(), gateway_b.resource_path());
+        assert_eq!(gateway_a.uuid("pc.local."), gateway_b.uuid("pc.local."));
+        assert!(gateway_a.capabilities.color);
+        assert!(!gateway_a.capabilities.duplex);
+        assert_eq!(gateway_b.status, PrinterStatus::Busy);
+        assert!(gateway_b.capabilities.duplex);
+        assert!(!gateway_b.capabilities.color);
     }
 }

@@ -3,8 +3,11 @@
     "title": "🖨️ AirPrinter"
   },
   "printers": {
-    "title": "打印机列表",
-    "no_printers": "未发现可共享的实体打印机。请先在 Windows 中安装打印机驱动并连接打印机，然后刷新。"
+    "title": "打印目标",
+    "no_printers": "未发现可用的 Windows 打印机。请连接打印机并安装 Windows 驱动，然后刷新。",
+    "target_hint": "手机选择 AirPrinter，任务自动转到此处选定的打印机。",
+    "selected_target": "AirPrinter → {{name}}",
+    "select_target": "选择 {{name}} 作为 AirPrinter 输出目标"
   },
   "logs": {
     "title": "运行日志",
@@ -12,8 +15,8 @@
     "waiting": "等待操作...",
     "fetching_printers": "正在获取打印机列表...",
     "found_printers": "找到 {{count}} 台打印机",
-    "sharing_printer": "正在共享打印机：{{id}}...",
-    "stopped_sharing": "已停止共享：{{id}}"
+    "sharing_printer": "正在设置 AirPrinter 目标：{{id}}...",
+    "stopped_sharing": "已关闭 AirPrinter 目标：{{id}}"
   },
   "status": {
     "online": "在线",
@@ -24,7 +27,7 @@
   "actions": {
     "refresh": "刷新",
     "share": "共享",
-    "stop_sharing": "停止共享",
+    "stop_sharing": "关闭 AirPrinter",
     "sharing": "共享中...",
     "stopping": "停止中...",
     "enable_lan_access": "允许局域网访问"

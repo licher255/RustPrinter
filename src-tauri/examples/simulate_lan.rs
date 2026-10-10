@@ -30,12 +30,13 @@ fn main() -> Result<(), String> {
         status: PrinterStatus::Online,
         capabilities: Default::default(),
     };
+    let public_printer = Printer::gateway_from(&printer);
     let mut server = AirPrintServer::isolated_for_test(address);
     server.share(printer.clone())?;
     let port = server.ipp_port().ok_or("IPP listener is missing")?;
     println!(
         "SIM_READY {}",
-        serde_json::json!({ "name": name, "id": printer.id, "port": port, "rp": printer.resource_path(), "address": address })
+        serde_json::json!({ "name": public_printer.name, "id": public_printer.id, "port": port, "rp": public_printer.resource_path(), "address": address })
     );
     let mut stop = String::new();
     let _ = io::stdin().lock().read_line(&mut stop);

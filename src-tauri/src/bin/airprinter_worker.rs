@@ -53,7 +53,34 @@ fn options(printer: &Printer, env: &HashMap<String, String>) -> Result<PrintOpti
     {
         return Err("Unsupported color mode".into());
     }
+    let scaling = value("IPP_PRINT_SCALING", "fit");
+    if !["auto", "auto-fit", "fit", "fill", "none"].contains(&scaling.as_str()) {
+        return Err("Unsupported print scaling".into());
+    }
+    let mut page_ranges = Vec::new();
+    let mut previous = 0;
+    if let Some(ranges) = env.get("IPP_PAGE_RANGES") {
+        for range in ranges.split(',') {
+            let range = range.trim();
+            let (min, max) = range.split_once('-').unwrap_or((range, range));
+            let min: i32 = min.parse().map_err(|_| "Invalid page range")?;
+            let max: i32 = max.parse().map_err(|_| "Invalid page range")?;
+            if min <= previous || max < min {
+                return Err("Page ranges must be positive, ascending and non-overlapping".into());
+            }
+            page_ranges.push((min, max));
+            previous = max;
+        }
+    }
     Ok(PrintOptions {
+        job_name: value("IPP_JOB_NAME", "AirPrint document"),
+        page_ranges,
+        scaling,
+        fidelity: match value("IPP_ATTRIBUTE_FIDELITY", "false").as_str() {
+            "true" => true,
+            "false" => false,
+            _ => return Err("Invalid attribute fidelity".into()),
+        },
         copies,
         quality,
         sides,
@@ -89,6 +116,10 @@ fn run() -> Result<(), String> {
         "IPP_MEDIA",
         "IPP_SIDES",
         "IPP_PRINT_COLOR_MODE",
+        "IPP_PRINT_SCALING",
+        "IPP_PAGE_RANGES",
+        "IPP_JOB_NAME",
+        "IPP_ATTRIBUTE_FIDELITY",
     ]
     .into_iter()
     .filter_map(|key| std::env::var(key).ok().map(|value| (key.into(), value)))
@@ -149,12 +180,21 @@ mod tests {
         let mut env = HashMap::from([
             ("IPP_PRINT_QUALITY".into(), "high".into()),
             ("IPP_ORIENTATION_REQUESTED".into(), "landscape".into()),
+            ("IPP_PAGE_RANGES".into(), "2-3,5".into()),
+            ("IPP_PRINT_SCALING".into(), "none".into()),
+            ("IPP_JOB_NAME".into(), "合同".into()),
         ]);
         let settings = options(&printer, &env).unwrap();
         assert_eq!(
             (settings.quality, settings.orientation, settings.paper_kind),
             (5, 4, 9)
         );
+        assert_eq!(settings.page_ranges, vec![(2, 3), (5, 5)]);
+        assert_eq!(settings.scaling, "none");
+        assert_eq!(settings.job_name, "合同");
+        env.insert("IPP_PAGE_RANGES".into(), "2-3,3-5".into());
+        assert!(options(&printer, &env).is_err());
+        env.remove("IPP_PAGE_RANGES");
         env.insert("IPP_COPIES".into(), "999".into());
         assert!(options(&printer, &env).is_err());
     }

@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="color-scheme" content="light">
-    <meta name="description" content="AirPrinter 项目文档：把 Windows 打印队列发布到局域网，并通过 DNS-SD 与 IPP 接收 Apple 设备的打印作业。">
+    <meta name="description" content="AirPrinter 项目文档：在局域网发布单一虚拟 AirPrinter 入口，并将 Apple 设备的 IPP 作业转交给 PC 上选定的 Windows 打印队列。">
     <title>AirPrinter · 项目文档</title>
     <style>
       :root {
@@ -138,22 +138,22 @@
           <div>
             <p class="eyebrow">Windows → Local network → Apple devices</p>
             <h1>AirPrinter</h1>
-            <p class="lead">让 Windows 已安装的 USB、有线网络或已配对打印队列，通过局域网被发现，并使用标准 DNS-SD 与 IPP 接收打印作业。</p>
+            <p class="lead">在局域网发布一个固定的虚拟 AirPrinter，使用标准 DNS-SD 与 IPP 接收作业，并转交到 PC 当前选定的 Windows 队列。</p>
           </div>
           <div class="hero-illustration" aria-hidden="true"><div class="paper"></div><div class="printer-shape"></div></div>
         </header>
         <div class="status-grid" aria-label="当前项目状态">
           <div class="status-card"><strong>协议链路已实现</strong><span>DNS-SD 发现 · IPP 接收 · Windows 队列投递</span></div>
-          <div class="status-card"><strong>本地模拟已通过</strong><span>17 项后端测试及虚拟 PDF 输出</span></div>
+          <div class="status-card"><strong>本地验证已通过</strong><span>34 项库测试 · 虚拟入口至 Microsoft Print to PDF</span></div>
           <div class="status-card"><strong>实机验收待完成</strong><span>Apple 系统发现与实体出纸尚未验证</span></div>
         </div>
 
         <section class="content" id="overview" aria-labelledby="overview-heading">
           <span class="section-kicker">01 / Overview</span><h2 id="overview-heading">项目概览</h2>
-          <p class="intro">AirPrinter 是面向 Windows 10/11 的 Tauri 桌面程序。它读取 Windows 打印队列与驱动能力，将用户选择的队列发布为局域网打印服务；Apple 客户端通过 mDNS 找到入口后，使用 IPP/HTTP 发送文档，最后由 Windows 驱动处理页面并送入指定队列。</p>
+          <p class="intro">AirPrinter 是面向 Windows 10/11 的 Tauri 桌面程序。它在局域网发布一个固定的虚拟打印机入口；用户在 PC 上选定一个 Windows 输出队列。Apple 客户端通过 mDNS 找到 AirPrinter 后，使用 IPP/HTTP 发送作业，由 Windows 驱动处理页面并送入当前选定的队列。</p>
           <div class="card-grid">
-            <div class="card"><span class="number">01</span><h3>一台电脑，多台队列</h3><p>每台已共享打印机有独立的 DNS-SD 记录和 IPP 资源路径。作业按路径送入对应 Windows 队列，不切换系统默认打印机。</p></div>
-            <div class="card"><span class="number">02</span><h3>选过一次，重新连接可恢复</h3><p>共享选择保存在用户配置目录。程序每 30 秒检查队列；暂时离线时撤回广播，重新可用后恢复。</p></div>
+            <div class="card"><span class="number">01</span><h3>一个虚拟入口，一个当前目标</h3><p>手机始终选择 AirPrinter。PC 上选择单个 Windows 打印队列作为输出目标；服务使用固定的 <code>/ipp/print</code> 资源路径。</p></div>
+            <div class="card"><span class="number">02</span><h3>切换目标只影响新作业</h3><p>切换后新接收的作业绑定到新队列；已经接收的作业继续使用原目标。程序每 30 秒检查 Windows 队列状态。</p></div>
           </div>
         </section>
 
@@ -161,16 +161,16 @@
           <span class="section-kicker">02 / Use it</span><h2 id="quickstart-heading">快速开始</h2>
           <div class="card-grid">
             <div class="card"><span class="number">1</span><h3>准备 Windows 打印机</h3><p>安装打印机驱动，确认 PC 本地测试页可以正常输出。USB、网络和已配对队列均可使用；PDF、XPS、OneNote、Fax 等交互式虚拟目的地不会作为实体打印机显示。</p></div>
-            <div class="card"><span class="number">2</span><h3>启动并选择共享</h3><p>在程序列表中选择真实队列，点击“共享”。如 Windows 防火墙阻止访问，可点击“允许局域网访问”，按系统提示授权。</p></div>
+            <div class="card"><span class="number">2</span><h3>选择 Windows 输出目标</h3><p>在程序列表中单选一个真实队列。AirPrinter 会自动发布固定虚拟入口；如 Windows 防火墙阻止访问，可单独开启局域网规则。</p></div>
             <div class="card"><span class="number">3</span><h3>连接同一局域网</h3><p>PC 可通过网线接路由器，iPhone、iPad、Mac 可用 Wi-Fi。两侧必须能互通；访客网络与 AP 隔离会阻止发现。</p></div>
-            <div class="card"><span class="number">4</span><h3>从系统打印界面选择</h3><p>在 Apple 设备支持打印的应用中打开系统打印界面，选择共享队列。停止共享后，新请求会被拒绝并撤回对应广播。</p></div>
+            <div class="card"><span class="number">4</span><h3>从系统打印界面选择 AirPrinter</h3><p>在 Apple 设备支持打印的应用中打开系统打印界面，选择 AirPrinter。PC 切换目标不会改变手机端选择；“关闭 AirPrinter”会停止虚拟入口。</p></div>
           </div>
-          <div class="callout warning"><strong>当前验证范围</strong><p>本地协议模拟和 Windows 虚拟队列输出已通过；实际 iPhone/iPad/Mac 的系统发现和实体打印机出纸仍需连接设备后验收。</p></div>
+          <div class="callout warning"><strong>当前验证范围</strong><p>固定 HTTP 虚拟入口到 Microsoft Print to PDF 的单独测试已通过；真实手机原生提交和实体打印机出纸仍未验证。</p></div>
         </section>
 
         <section class="content" id="architecture" aria-labelledby="architecture-heading">
           <span class="section-kicker">03 / Architecture</span><h2 id="architecture-heading">工作原理</h2>
-          <p class="intro">前端只负责列出、共享和停止队列；监听、发现、解码与打印都在 Rust 后端。每个传入作业会检查格式与选项，再送入指定队列。</p>
+          <p class="intro">在手机系统打印面板选择 AirPrinter、设置选项并点击打印，PC 自动接收、渲染并投递到当前目标队列。切换 PC 目标只影响新接收的作业，已接收作业保留原目标。日常使用无需下载文档、打开查看器或在 PC 再次确认；浏览器测试页仅用于连接诊断。</p>
           <div class="flow" role="list" aria-label="打印处理流程">
             <div class="flow-step" role="listitem"><span class="step-number">STEP 01</span><strong>检测队列</strong><small>Windows 驱动与能力</small></div>
             <div class="flow-step" role="listitem"><span class="step-number">STEP 02</span><strong>广播服务</strong><small>mDNS / DNS-SD</small></div>
@@ -184,10 +184,10 @@
         <section class="content" id="protocol" aria-labelledby="protocol-heading">
           <span class="section-kicker">04 / Protocol</span><h2 id="protocol-heading">协议与文档格式</h2>
           <div class="table-wrap"><table><thead><tr><th>环节</th><th>当前实现</th><th>说明</th></tr></thead><tbody>
-            <tr><td>局域网发现</td><td><code>_ipp._tcp</code>、<code>_universal._sub._ipp._tcp</code>、<code>_printer._tcp</code></td><td>AirPrint 客户端通过 DNS-SD/mDNS 获取服务地址、端口和资源路径；<code>_printer._tcp</code> 使用端口 0。</td></tr>
-            <tr><td>传输</td><td>IPP/HTTP</td><td>支持 Print-Job、Validate-Job、Create-Job、Send-Document（单文档）、Get-Job-Attributes、Get-Jobs 与 Cancel-Job。</td></tr>
+            <tr><td>局域网发现</td><td>单一固定 AirPrinter：<code>_ipp._tcp</code>、<code>_universal._sub._ipp._tcp</code>、<code>_printer._tcp</code></td><td>DNS-SD/mDNS 始终发布一个虚拟打印机入口；<code>_printer._tcp</code> 使用端口 0。</td></tr>
+            <tr><td>传输</td><td>IPP/HTTP，固定资源路径 <code>/ipp/print</code></td><td>支持 Print-Job、Validate-Job、Create-Job、Send-Document（单文档）、Get-Job-Attributes、Get-Jobs 与 Cancel-Job。作业接收时绑定当前 Windows 目标。</td></tr>
             <tr><td>文档格式</td><td>PDF、JPEG、URF、PWG Raster</td><td>PDF 使用 Windows PDF API；图像与所公布的光栅格式经渲染后由 GDI 交给驱动。</td></tr>
-            <tr><td>打印选项</td><td>彩色、双面、份数、纸型、方向</td><td>按 Windows 驱动能力公布；不支持的值会被拒绝。彩色队列默认使用驱动的彩色能力。</td></tr>
+            <tr><td>打印选项</td><td>作业名、彩色、双面、份数、纸型、质量、方向、页码、缩放</td><td>页码按收到的文档编号；缩放支持适合页面、填满、原始尺寸和自动模式。其余选项按 Windows 驱动能力公布；不支持的值会被拒绝。</td></tr>
           </tbody></table></div>
           <p class="muted" style="margin-top: 15px">首选 IPP 端口 631；若被占用，使用 8631–8699 中的空闲端口，并通过 DNS-SD 公布实际值。<code>ipp://</code> URI 可省略默认的 631，HTTP <code>Host</code> 仍需指向连接端口。</p>
           <div class="callout warning"><strong>兼容性声明</strong><p>该项目尚未通过完整 IPP Everywhere 1.1 一致性或 Apple 实机验收。当前未发布 <code>_print._sub._ipp._tcp</code>，也未声称支持全部规范扩展。URF 是为了客户端互操作提供的文档格式；发现与传输仍走 DNS-SD 和 IPP。</p></div>
@@ -217,9 +217,10 @@ pnpm tauri build</code></pre>
         <section class="content" id="testing" aria-labelledby="testing-heading">
           <span class="section-kicker">07 / Verify</span><h2 id="testing-heading">验证与当前边界</h2>
           <div class="card-grid">
-            <div class="card"><h3>已本地验证</h3><p>17 项后端测试通过，覆盖 IPP 路由、作业、URI、mDNS 注册/注销、重启恢复与光栅解码；Microsoft Print to PDF 模拟了四种格式的静默打印。</p></div>
-            <div class="card"><h3>尚需实机验证</h3><p>真实 Apple 系统打印面板的发现、不同路由器与防火墙环境、实体打印机的出纸、离线、缺纸和双面等行为。</p></div>
+            <div class="card"><h3>已本地验证</h3><p>34 项 Rust 库测试通过，4 项忽略；<code>cargo check --all-targets</code> 通过。固定 HTTP 虚拟入口到 Microsoft Print to PDF 的独立输出测试通过。</p></div>
+            <div class="card"><h3>尚未实机验证</h3><p>真实手机原生打印作业提交和实体打印机出纸仍未验证。虚拟队列测试不等于真实 iPhone/iPad/Mac 与实体打印机验收。</p></div>
           </div>
+          <div class="callout"><strong>仅接收诊断模式</strong><p>可使用 <code>airprinter.exe --receive-only "绝对路径"</code> 将收到的文档保存为待处理作业，不调用打印驱动。该模式只用于接收链路诊断。普通模式会自动处理和投递作业，无需用户下载文档或手动打印。</p></div>
           <p class="code-label">协议和本地打印模拟</p>
           <pre><code>cargo test --manifest-path src-tauri/Cargo.toml --locked
 cargo test --manifest-path src-tauri/Cargo.toml --locked -- --include-ignored --nocapture
@@ -236,9 +237,9 @@ node scripts/simulate_airprint.mjs 172.22.48.1</code></pre>
         <section class="content" id="files" aria-labelledby="files-heading">
           <span class="section-kicker">08 / Source map</span><h2 id="files-heading">源码入口与参考</h2>
           <div class="table-wrap"><table><thead><tr><th>路径</th><th>职责</th></tr></thead><tbody>
-            <tr><td><a href="../src/components/PrinterList.ts">PrinterList.ts</a></td><td>打印机列表、共享操作与局域网放行入口</td></tr>
+            <tr><td><a href="../src/components/PrinterList.ts">PrinterList.ts</a></td><td>Windows 输出目标选择、AirPrinter 启停与局域网放行入口</td></tr>
             <tr><td><a href="../src-tauri/src/services/printer_detector.rs">printer_detector.rs</a></td><td>Windows 队列检测与能力解析</td></tr>
-            <tr><td><a href="../src-tauri/src/services/airprint_server.rs">airprint_server.rs</a></td><td>共享选择、广播与 IPP 服务生命周期</td></tr>
+            <tr><td><a href="../src-tauri/src/services/airprint_server.rs">airprint_server.rs</a></td><td>单一 Windows 目标、固定 AirPrinter 服务与 IPP 生命周期</td></tr>
             <tr><td><a href="../src-tauri/src/services/mdns_broadcaster.rs">mdns_broadcaster.rs</a></td><td>DNS-SD/mDNS 注册、更新和撤回</td></tr>
             <tr><td><a href="../src-tauri/src/services/ipp/server.rs">ipp/server.rs</a></td><td>IPP/HTTP 请求、打印机属性与作业管理</td></tr>
             <tr><td><a href="../src-tauri/src/services/print_job.rs">print_job.rs</a> · <a href="../src-tauri/src/services/raster.rs">raster.rs</a></td><td>文档投递、Windows 作业状态与光栅解码</td></tr>

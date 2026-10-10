@@ -11,6 +11,7 @@ pub mod ipp;
 pub use ipp::IppServer;
 
 pub mod print_job;
+pub mod diagnostics;
 pub mod raster;
 
 pub mod settings;

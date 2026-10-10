@@ -39,13 +39,20 @@ impl MdnsBroadcaster {
     }
 
     pub fn new_on_interface(address: IpAddr) -> Result<Self, String> {
-        let broadcaster = Self::new()?;
+        let mut broadcaster = Self::new()?;
         let interfaces = local_ip_address::list_afinet_netifas().map_err(|e| e.to_string())?;
         if !interfaces.iter().any(|(_, ip)| *ip == address) {
             return Err(format!(
                 "Simulation interface {address} is not configured locally"
             ));
         }
+        let mut hasher = DefaultHasher::new();
+        address.hash(&mut hasher);
+        let interface_hash = hasher.finish() as u32;
+        broadcaster.hostname = format!(
+            "airprinter-sim-{:x}-{interface_hash:08x}.local.",
+            std::process::id()
+        );
         for (_, ip) in interfaces {
             if ip != address {
                 broadcaster
@@ -133,6 +140,26 @@ impl MdnsBroadcaster {
         .map_err(|e| e.to_string())
     }
 
+    fn service_infos(
+        printer: &Printer,
+        hostname: &str,
+        port: u16,
+        secure_port: Option<u16>,
+    ) -> Result<Vec<ServiceInfo>, String> {
+        let ipp = Self::service_info(printer, hostname, port, "_universal._sub._ipp._tcp.local.")?;
+        let flagship = Self::service_info(printer, hostname, 0, "_printer._tcp.local.")?;
+        let mut services = vec![ipp, flagship];
+        if let Some(port) = secure_port {
+            services.push(Self::service_info(
+                printer,
+                hostname,
+                port,
+                "_universal._sub._ipps._tcp.local.",
+            )?);
+        }
+        Ok(services)
+    }
+
     pub fn broadcast_airprint(&mut self, printer: &Printer, port: u16) -> Result<(), String> {
         self.broadcast_with_tls(printer, port, None)
     }
@@ -148,22 +175,7 @@ impl MdnsBroadcaster {
         }
         // A subtype's PTR targets the base _ipp instance. Register it ONCE, not
         // as a second service with a different SRV target (which overwrites it).
-        let ipp = Self::service_info(
-            printer,
-            &self.hostname,
-            port,
-            "_universal._sub._ipp._tcp.local.",
-        )?;
-        let flagship = Self::service_info(printer, &self.hostname, 0, "_printer._tcp.local.")?;
-        let mut services = vec![ipp, flagship];
-        if let Some(port) = secure_port {
-            services.push(Self::service_info(
-                printer,
-                &self.hostname,
-                port,
-                "_universal._sub._ipps._tcp.local.",
-            )?);
-        }
+        let services = Self::service_infos(printer, &self.hostname, port, secure_port)?;
         let mut fullnames: Vec<String> = Vec::new();
         let events = self.daemon.monitor().map_err(|e| e.to_string())?;
         for info in services {
@@ -226,21 +238,8 @@ impl MdnsBroadcaster {
         if !self.registrations.contains_key(&printer.id) {
             return Err("Printer is not advertised".into());
         }
-        let ipp = Self::service_info(
-            printer,
-            &self.hostname,
-            port,
-            "_universal._sub._ipp._tcp.local.",
-        )?;
-        self.daemon.register(ipp).map_err(|e| e.to_string())?;
-        if let Some(port) = secure_port {
-            let ipps = Self::service_info(
-                printer,
-                &self.hostname,
-                port,
-                "_universal._sub._ipps._tcp.local.",
-            )?;
-            self.daemon.register(ipps).map_err(|e| e.to_string())?;
+        for service in Self::service_infos(printer, &self.hostname, port, secure_port)? {
+            self.daemon.register(service).map_err(|e| e.to_string())?;
         }
         Ok(())
     }
@@ -319,6 +318,54 @@ mod tests {
         );
         assert_eq!(secure.get_property_val_str("TLS"), Some("1.2"));
         assert_eq!(info.get_property_val_str("TLS"), None);
+    }
+
+    #[test]
+    fn gateway_target_switch_keeps_one_stable_discovery_identity() {
+        let mut target_a = Printer {
+            id: "physical-a".into(),
+            name: "Office A".into(),
+            status: PrinterStatus::Online,
+            capabilities: Default::default(),
+        };
+        target_a.capabilities.color = true;
+        let mut target_b = Printer {
+            id: "physical-b".into(),
+            name: "Office B".into(),
+            status: PrinterStatus::Online,
+            capabilities: Default::default(),
+        };
+        target_b.capabilities.duplex = true;
+        let gateway_a = Printer::gateway_from(&target_a);
+        let gateway_b = Printer::gateway_from(&target_b);
+        let services_a =
+            MdnsBroadcaster::service_infos(&gateway_a, "pc.local.", 631, Some(8631)).unwrap();
+        let services_b =
+            MdnsBroadcaster::service_infos(&gateway_b, "pc.local.", 631, Some(8631)).unwrap();
+        assert_eq!(services_a.len(), 3);
+        assert_eq!(services_b.len(), 3);
+        let labels_a: HashSet<_> = services_a
+            .iter()
+            .map(|info| info.get_fullname().split('.').next().unwrap().to_string())
+            .collect();
+        let labels_b: HashSet<_> = services_b
+            .iter()
+            .map(|info| info.get_fullname().split('.').next().unwrap().to_string())
+            .collect();
+        assert_eq!(labels_a.len(), 1);
+        assert_eq!(labels_a, labels_b);
+        for (a, b) in services_a.iter().zip(&services_b) {
+            assert_eq!(a.get_fullname(), b.get_fullname());
+            assert_eq!(a.get_property_val_str("rp"), Some("ipp/print"));
+            assert_eq!(
+                a.get_property_val_str("UUID"),
+                b.get_property_val_str("UUID")
+            );
+            assert_eq!(a.get_property_val_str("ty"), Some("AirPrinter"));
+        }
+        assert_eq!(services_a[0].get_property_val_str("Color"), Some("T"));
+        assert_eq!(services_b[0].get_property_val_str("Color"), Some("F"));
+        assert_eq!(services_b[0].get_property_val_str("Duplex"), Some("T"));
     }
 
     #[test]

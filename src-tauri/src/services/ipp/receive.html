@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AirPrinter 仅接收</title>
+  <style>
+    :root { color-scheme: light dark; font: 16px system-ui, sans-serif; }
+    body { max-width: 38rem; margin: 3rem auto; padding: 0 1rem; }
+    main { border: 1px solid #8886; border-radius: 1rem; padding: 1.5rem; }
+    h1 { margin-top: 0; }
+    p { line-height: 1.5; }
+    input, button { font: inherit; }
+    input { display: block; width: 100%; margin: 1rem 0; }
+    button { padding: .65rem 1rem; }
+    #status { white-space: pre-wrap; overflow-wrap: anywhere; min-height: 3rem; }
+  </style>
+</head>
+<body>
+  <main id="receiver" data-printer-path="__PRINTER_PATH__">
+    <h1>接收文件</h1>
+    <p>此页面仅接收并保存一个 PDF 或 JPEG 文件，不会打印。</p>
+    <label for="document">选择 PDF 或 JPEG 文件</label>
+    <input id="document" type="file" accept=".pdf,.jpg,.jpeg,application/pdf,image/jpeg">
+    <button id="upload" type="button">上传并保存</button>
+    <p id="status" role="status" aria-live="polite">请选择文件。</p>
+  </main>
+  <script>
+    (() => {
+      const root = document.getElementById("receiver");
+      const fileInput = document.getElementById("document");
+      const button = document.getElementById("upload");
+      const status = document.getElementById("status");
+      const encoder = new TextEncoder();
+      const decoder = new TextDecoder();
+      const path = root.dataset.printerPath;
+      const MAX_DOCUMENT_BYTES = 64 * 1024 * 1024 - 4096;
+      let nextRequestId = crypto.getRandomValues(new Uint32Array(1))[0] & 0x7fffffff;
+
+      function requestId() {
+        nextRequestId = (nextRequestId + 1) & 0x7fffffff;
+        return nextRequestId || ++nextRequestId;
+      }
+      function u16(value) { return [(value >>> 8) & 255, value & 255]; }
+      function join(parts) {
+        const size = parts.reduce((sum, part) => sum + part.length, 0);
+        const result = new Uint8Array(size);
+        let offset = 0;
+        for (const part of parts) { result.set(part, offset); offset += part.length; }
+        return result;
+      }
+      function textAttribute(tag, name, value) {
+        const nameBytes = encoder.encode(name);
+        const valueBytes = encoder.encode(value);
+        if (nameBytes.length > 255 || valueBytes.length > 65535) throw new Error("IPP 属性过长。");
+        return join([Uint8Array.of(tag), Uint8Array.from(u16(nameBytes.length)), nameBytes,
+          Uint8Array.from(u16(valueBytes.length)), valueBytes]);
+      }
+      function integerAttribute(tag, name, value) {
+        const nameBytes = encoder.encode(name);
+        const data = new Uint8Array(4);
+        new DataView(data.buffer).setInt32(0, value, false);
+        return join([Uint8Array.of(tag), Uint8Array.from(u16(nameBytes.length)), nameBytes,
+          Uint8Array.of(0, 4), data]);
+      }
+      function ippHeader(operation, id, printerUri, operationAttributes, jobAttributes) {
+        const requestIdBytes = new Uint8Array(4);
+        new DataView(requestIdBytes.buffer).setUint32(0, id, false);
+        const parts = [Uint8Array.of(2, 0, (operation >>> 8) & 255, operation & 255), requestIdBytes,
+          Uint8Array.of(1), textAttribute(0x47, "attributes-charset", "utf-8"),
+          textAttribute(0x48, "attributes-natural-language", "en"),
+          textAttribute(0x45, "printer-uri", printerUri), ...operationAttributes];
+        if (jobAttributes.length) parts.push(Uint8Array.of(2), ...jobAttributes);
+        parts.push(Uint8Array.of(3));
+        return join(parts);
+      }
+      function parseResponse(bytes, expectedId) {
+        if (bytes.length < 9) throw new Error("打印服务返回的 IPP 响应过短。");
+        const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        const statusCode = view.getUint16(2, false);
+        if (view.getUint32(4, false) !== expectedId) throw new Error("IPP 响应编号不匹配。");
+        if (statusCode >= 0x0400) throw new Error(`IPP 请求失败（状态 0x${statusCode.toString(16)}）。`);
+        const attrs = {};
+        let index = 8;
+        let previousName = "";
+        let ended = false;
+        while (index < bytes.length) {
+          const tag = bytes[index++];
+          if (tag === 3) { ended = true; break; }
+          if (tag < 0x10) { previousName = ""; continue; }
+          if (index + 2 > bytes.length) throw new Error("IPP 属性名称格式错误。");
+          const nameLength = view.getUint16(index, false); index += 2;
+          if (index + nameLength + 2 > bytes.length) throw new Error("IPP 属性格式错误。");
+          if (nameLength) previousName = decoder.decode(bytes.subarray(index, index + nameLength));
+          index += nameLength;
+          const valueLength = view.getUint16(index, false); index += 2;
+          if (index + valueLength > bytes.length) throw new Error("IPP 属性值格式错误。");
+          const valueBytes = bytes.subarray(index, index + valueLength); index += valueLength;
+          if (!previousName) continue;
+          const value = (tag === 0x21 || tag === 0x23) && valueLength === 4
+            ? new DataView(valueBytes.buffer, valueBytes.byteOffset, 4).getInt32(0, false)
+            : decoder.decode(valueBytes);
+          if (Object.prototype.hasOwnProperty.call(attrs, previousName)) {
+            attrs[previousName] = Array.isArray(attrs[previousName])
+              ? [...attrs[previousName], value] : [attrs[previousName], value];
+          } else attrs[previousName] = value;
+        }
+        if (!ended) throw new Error("IPP 响应不完整，缺少结束标记。");
+        return attrs;
+      }
+      async function ippPost(url, header, file) {
+        const body = file ? new Blob([header, file], { type: "application/ipp" }) : header;
+        const response = await fetch(url, { method: "POST", headers: {
+          "Content-Type": "application/ipp",
+          "X-AirPrinter-Receive-Only": "1"
+        }, body, cache: "no-store" });
+        if (!response.ok) throw new Error(`AirPrinter 返回 HTTP ${response.status}。`);
+        return response.arrayBuffer();
+      }
+      function formatFor(file) {
+        const extension = file.name.toLowerCase().split(".").pop();
+        const byExtension = extension === "pdf" ? "application/pdf"
+          : (extension === "jpg" || extension === "jpeg") ? "image/jpeg" : null;
+        const mime = file.type.toLowerCase();
+        const byMime = mime === "application/pdf" ? "application/pdf"
+          : (mime === "image/jpeg" || mime === "image/jpg") ? "image/jpeg" : null;
+        if (byExtension && byMime && byExtension !== byMime) throw new Error("文件扩展名与文件类型不一致。");
+        const format = byMime || byExtension;
+        if (!format) throw new Error("仅支持 PDF 和 JPEG 文件。");
+        return format;
+      }
+      async function pollJob(uri, jobId) {
+        const requested = ["job-state", "job-state-reasons", "job-state-message"]
+          .map((name, index) => textAttribute(0x44, index ? "" : "requested-attributes", name));
+        for (let attempt = 0; attempt < 80; attempt++) {
+          const id = requestId();
+          const header = ippHeader(0x0009, id, uri, [integerAttribute(0x21, "job-id", jobId), ...requested], []);
+          const attrs = parseResponse(new Uint8Array(await ippPost(`${path}/jobs/${jobId}`, header)), id);
+          const stateValue = attrs["job-state"];
+          const jobState = Array.isArray(stateValue) ? stateValue[stateValue.length - 1] : stateValue;
+          const reasons = attrs["job-state-reasons"];
+          const reason = Array.isArray(reasons) ? reasons.join(", ") : String(reasons || "");
+          const message = String(attrs["job-state-message"] || "");
+          if (jobState === 4 && reason.includes("job-hold-until-specified")
+              && /diagnostic only/i.test(message) && /no Windows print submitted/i.test(message)
+              && /Saved:/i.test(message)) return message;
+          if (jobState === 7 || jobState === 8 || jobState === 9) {
+            throw new Error(message || `IPP 作业已结束，状态为 ${jobState}。`);
+          }
+          status.textContent = `文件已发送，正在等待保存确认（作业 ${jobId}，状态 ${jobState}）。`;
+          await new Promise(resolve => setTimeout(resolve, 500));
+        }
+        throw new Error("等待保存确认超时。");
+      }
+      button.addEventListener("click", async () => {
+        if (button.disabled) return;
+        const file = fileInput.files && fileInput.files[0];
+        if (!file) { status.textContent = "请先选择 PDF 或 JPEG 文件。"; return; }
+        button.disabled = true;
+        fileInput.disabled = true;
+        try {
+          const format = formatFor(file);
+          if (file.size > MAX_DOCUMENT_BYTES) throw new Error("文件超过 64 MiB 接收限制。");
+          if (encoder.encode(file.name).length > 255) throw new Error("文件名过长，无法通过 IPP 发送。");
+          status.textContent = `正在上传 ${file.name}（${file.size} 字节），请保持此页面打开。`;
+          const printerUri = `${location.protocol === "https:" ? "ipps" : "ipp"}://${location.host}${path}`;
+          const id = requestId();
+          const jobName = textAttribute(0x42, "job-name", file.name);
+          const documentFormat = textAttribute(0x49, "document-format", format);
+          const header = ippHeader(0x0002, id, printerUri, [documentFormat], [jobName]);
+          const attrs = parseResponse(new Uint8Array(await ippPost(path, header, file)), id);
+          const jobId = attrs["job-id"];
+          if (!Number.isInteger(jobId) || jobId < 1) throw new Error("IPP 响应中没有有效的作业编号。");
+          const saved = await pollJob(printerUri, jobId);
+          status.textContent = `已接收并保存，不会打印。\n${saved}`;
+        } catch (error) {
+          status.textContent = `接收失败。\n${error instanceof Error ? error.message : String(error)}`;
+        } finally {
+          button.disabled = false;
+          fileInput.disabled = false;
+        }
+      });
+    })();
+  </script>
+</body>
+</html>
