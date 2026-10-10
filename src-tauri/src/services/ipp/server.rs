@@ -43,6 +43,9 @@ struct Job {
     canceled: Arc<AtomicBool>,
     spool_id: Option<i32>,
     created: Instant,
+    uuid: String,
+    processed: Option<Instant>,
+    ended: Option<Instant>,
 }
 struct State {
     printers: HashMap<String, (Printer, String)>,
@@ -415,6 +418,54 @@ impl IppServer {
                     .with_header(Header::from_bytes("Cache-Control", "no-store").unwrap()),
             );
             return;
+        }
+        // PWG 5100.14 Table 5 note 6: serve the absolute "printer-icons" URIs.
+        if request.method() == &tiny_http::Method::Get {
+            if let Some(icon) = request.url().strip_prefix("/icons/") {
+                let bytes: Option<&[u8]> = match icon {
+                    "32.png" => Some(include_bytes!("../../../icons/32x32.png").as_slice()),
+                    "64.png" => Some(include_bytes!("../../../icons/64x64.png").as_slice()),
+                    "128.png" => Some(include_bytes!("../../../icons/128x128.png").as_slice()),
+                    "512.png" => Some(include_bytes!("../../../icons/icon.png").as_slice()),
+                    _ => None,
+                };
+                let Some(bytes) = bytes else {
+                    let _ = request.respond(Response::empty(404));
+                    return;
+                };
+                // Cacheable per PWG 5100.14 section 5.1.3.
+                let _ = request.respond(
+                    Response::from_data(bytes.to_vec())
+                        .with_header(Header::from_bytes("Content-Type", "image/png").unwrap())
+                        .with_header(Header::from_bytes("Cache-Control", "max-age=86400").unwrap()),
+                );
+                return;
+            }
+            // Landing page for the "printer-more-info"/"adminurl" references.
+            if request.url() == "/" {
+                let state = shared.lock().unwrap_or_else(|e| e.into_inner());
+                let mut rows = String::new();
+                for (path, (printer, _)) in state.printers.iter() {
+                    rows.push_str(&format!(
+                        "<li><strong>{}</strong> — {} — <code>{}</code></li>",
+                        escape_html_attribute(&printer.name),
+                        printer.status.as_str(),
+                        escape_html_attribute(path),
+                    ));
+                }
+                drop(state);
+                let page = format!(
+                    "<!doctype html><html><head><meta charset=\"utf-8\"><title>AirPrinter</title></head><body><h1>AirPrinter</h1><ul>{rows}</ul></body></html>"
+                );
+                let _ = request.respond(
+                    Response::from_string(page)
+                        .with_header(
+                            Header::from_bytes("Content-Type", "text/html; charset=utf-8").unwrap(),
+                        )
+                        .with_header(Header::from_bytes("Cache-Control", "no-store").unwrap()),
+                );
+                return;
+            }
         }
         let requested_path = request.url().to_string();
         let request_base = requested_path
@@ -794,6 +845,53 @@ fn keywords(values: &[&str]) -> IppValue {
     )
 }
 
+/// RFC 8011 dateTime in UTC (utc_dir '+', zero offset is always valid).
+fn ipp_datetime(at: std::time::SystemTime) -> IppValue {
+    let secs = at
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let days = (secs / 86400) as i64;
+    let day_secs = secs % 86400;
+    // Howard Hinnant's civil-from-days algorithm.
+    let z = days + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = (z - era * 146097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = (doy - (153 * mp + 2) / 5 + 1) as u8;
+    let month = (if mp < 10 { mp + 3 } else { mp - 9 }) as u8;
+    let year = (if month <= 2 { y + 1 } else { y }) as u16;
+    IppValue::DateTime {
+        year,
+        month,
+        day,
+        hour: (day_secs / 3600) as u8,
+        minutes: ((day_secs % 3600) / 60) as u8,
+        seconds: (day_secs % 60) as u8,
+        deci_seconds: 0,
+        utc_dir: '+',
+        utc_hours: 0,
+        utc_mins: 0,
+    }
+}
+
+/// PWG 5100.14 section 5.7.2: job URIs/UUIDs must not be reused; include the
+/// wall clock so IDs survive a restart of this process.
+fn job_uuid(path: &str, id: i32) -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    uuid::Uuid::new_v5(
+        &uuid::Uuid::NAMESPACE_OID,
+        format!("airprinter-job:{path}:{id}:{nanos}").as_bytes(),
+    )
+    .to_string()
+}
+
 fn wants_printer_attribute(requested: Option<&IppValue>, name: &str) -> bool {
     // AirPrint's observed polling lists omit the printer URI. Include the
     // canonical submission endpoint and its matching security/authentication
@@ -886,12 +984,47 @@ fn options(
             return Err(StatusCode::ClientErrorBadRequest);
         }
     }
+    let mut named = false;
     if let Some(value) = attr(req, "job-name") {
         options.job_name = match value {
             IppValue::NameWithoutLanguage(value) => value.clone(),
             IppValue::NameWithLanguage { name, .. } => name.clone(),
             _ => return Err(StatusCode::ClientErrorAttributesOrValuesNotSupported),
         };
+        named = true;
+    }
+    // STD 92 Table 8: "document-name" names the document; use it when the
+    // client did not supply a job name (iOS Send-Document carries it).
+    if !named {
+        if let Some(value) = attr(req, "document-name") {
+            options.job_name = match value {
+                IppValue::NameWithoutLanguage(value) => value.clone(),
+                IppValue::NameWithLanguage { name, .. } => name.clone(),
+                IppValue::TextWithoutLanguage(value) => value.clone(),
+                IppValue::TextWithLanguage { text, .. } => text.clone(),
+                _ => return Err(StatusCode::ClientErrorAttributesOrValuesNotSupported),
+            };
+        }
+    }
+    // STD 92 Table 12: validate against the single advertised resolution.
+    if let Some(value) = attr(req, "printer-resolution") {
+        let supported = matches!(
+            value,
+            IppValue::Resolution {
+                cross_feed: 300,
+                feed: 300,
+                units: 3,
+            }
+        );
+        if !supported {
+            return Err(StatusCode::ClientErrorAttributesOrValuesNotSupported);
+        }
+    }
+    // STD 92 Table 12 (conditional for PDF): only collated single-document jobs.
+    if let Some(value) = attr(req, "multiple-document-handling") {
+        if value != &IppValue::Keyword("separate-documents-collated-copies".into()) {
+            return Err(StatusCode::ClientErrorAttributesOrValuesNotSupported);
+        }
     }
     if let Some(value) = attr(req, "copies") {
         if let IppValue::Integer(value) = value {
@@ -1032,6 +1165,7 @@ fn process_request_at_port_with_alias(
             job.state = 8;
             job.reason = "job-data-insufficient".into();
             job.message = "No document received within 60 seconds".into();
+            job.ended = Some(Instant::now());
             trace!("[IPP] job={} timed out waiting for Send-Document", job.id);
         }
         let Some((p, _)) = state.printers.get(path) else {
@@ -1124,9 +1258,42 @@ fn process_request_at_port_with_alias(
             response
                 .attributes_mut()
                 .groups_mut()
-                .push(job_group(job, &uri));
+                .push(job_group(job, &uri, state.started));
         }
         return response;
+    }
+    // PWG 5100.14 Table 4: Identify-Printer (0x003C). A Windows queue proxy has
+    // no display or speaker to flash; accept and log instead of failing.
+    if op == 0x003c {
+        trace!("[IPP] request_id={id} Identify-Printer accepted (no physical indicator)");
+        return error(StatusCode::SuccessfulOk);
+    }
+    // PWG 5100.14 Table 4: Cancel-My-Jobs (0x0039).
+    if op == 0x0039 {
+        let owner = string_attr(&req, "requesting-user-name")
+            .unwrap_or("anonymous")
+            .to_string();
+        let mut state = shared.lock().unwrap_or_else(|e| e.into_inner());
+        let ids: Vec<i32> = state
+            .jobs
+            .values()
+            .filter(|j| j.path == path && j.owner == owner && j.state < 7)
+            .map(|j| j.id)
+            .collect();
+        trace!("[IPP] request_id={id} Cancel-My-Jobs owner={owner:?} jobs={ids:?}");
+        for job_id in ids {
+            if let Some(current) = state.jobs.get_mut(&job_id) {
+                if let Some(spool_id) = current.spool_id {
+                    let _ = print_job::cancel_spool_job(&current.printer, spool_id);
+                }
+                current.canceled.store(true, Ordering::Release);
+                current.state = 7;
+                current.reason = "canceled-by-user".into();
+                current.message.clear();
+                current.ended = Some(Instant::now());
+            }
+        }
+        return error(StatusCode::SuccessfulOk);
     }
     let supplied_job_id = match attr(&req, "job-id") {
         Some(IppValue::Integer(id)) => Some(*id),
@@ -1152,14 +1319,18 @@ fn process_request_at_port_with_alias(
         return error(StatusCode::ClientErrorConflictingAttributes);
     }
     let target_id = supplied_job_id.or(supplied_job_uri_id);
-    if [0x0008, 0x0009].contains(&op) {
-        let job = shared
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .jobs
-            .get(&target_id.unwrap_or(0))
-            .filter(|j| j.path == path)
-            .cloned();
+    if [0x0008, 0x0009, 0x003b].contains(&op) {
+        let (job, started) = {
+            let state = shared.lock().unwrap_or_else(|e| e.into_inner());
+            (
+                state
+                    .jobs
+                    .get(&target_id.unwrap_or(0))
+                    .filter(|j| j.path == path)
+                    .cloned(),
+                state.started,
+            )
+        };
         let Some(job) = job else {
             return error(StatusCode::ClientErrorNotFound);
         };
@@ -1179,14 +1350,39 @@ fn process_request_at_port_with_alias(
                     current.state = 7;
                     current.reason = "job-canceled-by-user".into();
                 }
+                current.ended = Some(Instant::now());
             }
             return error(StatusCode::SuccessfulOk);
         }
+        // PWG 5100.14 Table 4: Close-Job (0x003B). Documents submitted via
+        // Send-Document run immediately here; an empty job completes in place.
+        if op == 0x003b {
+            let mut state = shared.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(current) = state.jobs.get_mut(&job.id) {
+                if current.state == 4 && current.reason == "job-incoming" {
+                    current.state = 9;
+                    current.reason = "job-completed-successfully".into();
+                    current.message = "Closed without a document".into();
+                    current.ended = Some(Instant::now());
+                }
+            }
+        }
+        let job = if op == 0x003b {
+            shared
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .jobs
+                .get(&job.id)
+                .cloned()
+                .unwrap_or(job)
+        } else {
+            job
+        };
         let mut response = error(StatusCode::SuccessfulOk);
         response
             .attributes_mut()
             .groups_mut()
-            .push(job_group(&job, &uri));
+            .push(job_group(&job, &uri, started));
         return response;
     }
     if ![0x0002, 0x0004, 0x0005, 0x0006].contains(&op) {
@@ -1344,6 +1540,9 @@ fn process_request_at_port_with_alias(
                 canceled: Arc::new(AtomicBool::new(false)),
                 spool_id: None,
                 created: Instant::now(),
+                uuid: job_uuid(path, job_id),
+                processed: None,
+                ended: None,
             }
         };
         job.name = opts.job_name.clone();
@@ -1355,19 +1554,29 @@ fn process_request_at_port_with_alias(
         state.jobs.insert(job.id, job.clone());
         job
     };
+    let started = shared.lock().unwrap_or_else(|e| e.into_inner()).started;
     let mut response = error(StatusCode::SuccessfulOk);
     response
         .attributes_mut()
         .groups_mut()
-        .push(job_group(&job, &uri));
+        .push(job_group(&job, &uri, started));
     if op != 0x0005 {
         run_job(shared.clone(), job, document, format);
     }
     response
 }
 
-fn job_group(job: &Job, uri: &str) -> IppAttributeGroup {
+fn job_group(job: &Job, uri: &str, started: Instant) -> IppAttributeGroup {
     let mut group = IppAttributeGroup::new(DelimiterTag::JobAttributes);
+    let elapsed_secs =
+        |at: Instant| at.duration_since(started).as_secs().min(i32::MAX as u64) as i32;
+    // Instant carries no wall clock; reconstruct it from the current time.
+    let wall_at = |at: Instant| {
+        std::time::SystemTime::now()
+            .checked_sub(at.elapsed())
+            .unwrap_or(std::time::SystemTime::now())
+    };
+    // PWG 5100.14 Tables 10 (description) and 11 (status): full job attribute set.
     for (name, value) in [
         ("job-id", IppValue::Integer(job.id)),
         ("job-uri", IppValue::Uri(format!("{uri}/jobs/{}", job.id))),
@@ -1383,6 +1592,40 @@ fn job_group(job: &Job, uri: &str) -> IppAttributeGroup {
             "job-originating-user-name",
             IppValue::NameWithoutLanguage(job.owner.clone()),
         ),
+        ("job-uuid", IppValue::Uri(format!("urn:uuid:{}", job.uuid))),
+        (
+            "job-printer-up-time",
+            IppValue::Integer(elapsed_secs(Instant::now())),
+        ),
+        ("time-at-creation", IppValue::Integer(elapsed_secs(job.created))),
+        (
+            "time-at-processing",
+            job.processed
+                .map(|at| IppValue::Integer(elapsed_secs(at)))
+                .unwrap_or(IppValue::NoValue),
+        ),
+        (
+            "time-at-completed",
+            job.ended
+                .map(|at| IppValue::Integer(elapsed_secs(at)))
+                .unwrap_or(IppValue::NoValue),
+        ),
+        ("date-time-at-creation", ipp_datetime(wall_at(job.created))),
+        (
+            "date-time-at-processing",
+            job.processed
+                .map(|at| ipp_datetime(wall_at(at)))
+                .unwrap_or(IppValue::NoValue),
+        ),
+        (
+            "date-time-at-completed",
+            job.ended
+                .map(|at| ipp_datetime(wall_at(at)))
+                .unwrap_or(IppValue::NoValue),
+        ),
+        // Page counts are unknown until the Windows driver renders the job.
+        ("job-impressions", IppValue::Integer(0)),
+        ("job-impressions-completed", IppValue::Integer(0)),
     ] {
         group
             .attributes_mut()
@@ -1415,6 +1658,7 @@ fn run_job(shared: Shared, job: Job, document: Vec<u8>, format: String) {
                         current.state = 7;
                         current.reason = "job-canceled-by-user".into();
                         current.message.clear();
+                        current.ended = Some(Instant::now());
                     } else {
                         current.state = 4;
                         current.reason = "job-hold-until-specified".into();
@@ -1581,6 +1825,13 @@ fn set_job(shared: &Shared, id: i32, state: i32, reason: &str, message: &str) {
             job.reason = reason.into();
             job.message = message.chars().take(1024).collect();
         }
+        let now = Instant::now();
+        if matches!(job.state, 5 | 6) && job.processed.is_none() {
+            job.processed = Some(now);
+        }
+        if job.state >= 7 && job.ended.is_none() {
+            job.ended = Some(now);
+        }
     }
 }
 
@@ -1614,6 +1865,82 @@ fn printer_attributes(
         .find(|(p, _)| p.id == printer.id)
         .map(|(_, h)| h.as_str())
         .unwrap_or("");
+    // PWG 5100.14 section 8.4 / note 6: absolute HTTP(S) URIs derived from the
+    // same authority the client just used, never link-local or invented names.
+    let authority = uri
+        .split("://")
+        .nth(1)
+        .and_then(|rest| rest.split('/').next())
+        .unwrap_or("");
+    let http_origin = format!(
+        "{}://{}",
+        if uri.starts_with("ipps:") { "https" } else { "http" },
+        authority
+    );
+    let now_wall = std::time::SystemTime::now();
+    let started_wall = now_wall
+        .checked_sub(state.started.elapsed())
+        .unwrap_or(now_wall);
+    // PWG 5100.14 Table 5: identity attributes iOS requests in its discovery
+    // query; "printer-dns-sd-name" ties the response to the mDNS instance.
+    put(
+        "printer-dns-sd-name",
+        IppValue::NameWithoutLanguage(printer.dns_sd_name(hostname)),
+    );
+    put("printer-location", IppValue::TextWithoutLanguage(String::new()));
+    put(
+        "printer-organization",
+        IppValue::TextWithoutLanguage(String::new()),
+    );
+    put(
+        "printer-organizational-unit",
+        IppValue::TextWithoutLanguage(String::new()),
+    );
+    // Geo-location is unknown; out-of-band "no-value" per PWG 5100.13.
+    put("printer-geo-location", IppValue::NoValue);
+    put(
+        "printer-more-info",
+        IppValue::Uri(format!("{http_origin}/")),
+    );
+    put(
+        "printer-icons",
+        IppValue::Array(vec![
+            IppValue::Uri(format!("{http_origin}/icons/128.png")),
+            IppValue::Uri(format!("{http_origin}/icons/512.png")),
+        ]),
+    );
+    put(
+        "printer-get-attributes-supported",
+        keywords(&["document-format"]),
+    );
+    put("job-ids-supported", IppValue::Boolean(true));
+    // No constraints/resolvers configured: empty 1setOf encodes as no-value.
+    put("job-constraints-supported", IppValue::NoValue);
+    put("job-resolvers-supported", IppValue::NoValue);
+    put("preferred-attributes-supported", IppValue::Boolean(false));
+    put(
+        "multiple-operation-timeout-action",
+        IppValue::Keyword("abort-job".into()),
+    );
+    put(
+        "overrides-supported",
+        keywords(&["document-numbers", "pages"]),
+    );
+    put("identify-actions-default", keywords(&["display"]));
+    put("identify-actions-supported", keywords(&["display"]));
+    // iOS requests this on every status poll; nothing is mandatory here.
+    put("printer-mandatory-job-attributes", IppValue::NoValue);
+    // PWG 5100.14 Table 7: status attributes.
+    put("pages-per-minute", IppValue::Integer(1));
+    put("pages-per-minute-color", IppValue::Integer(1));
+    put("printer-config-change-time", IppValue::Integer(1));
+    put(
+        "printer-config-change-date-time",
+        ipp_datetime(started_wall),
+    );
+    put("printer-state-change-time", IppValue::Integer(1));
+    put("printer-state-change-date-time", ipp_datetime(started_wall));
+    put("printer-current-time", ipp_datetime(now_wall));
     put(
         "printer-uuid",
         IppValue::Uri(format!("urn:uuid:{}", printer.uuid(hostname))),
@@ -1678,9 +2005,15 @@ fn printer_attributes(
     put("ipp-versions-supported", keywords(&["1.1", "2.0"]));
     // iOS/iPadOS 的系统打印对话框要求该标记才会列出打印机（见 AGENTS.md）。
     put("ipp-features-supported", keywords(&["ipp-everywhere"]));
+    // PWG 5100.14 Table 4: includes Cancel-My-Jobs (0x0039), Close-Job
+    // (0x003B) and Identify-Printer (0x003C).
     put(
         "operations-supported",
-        IppValue::Array([2, 4, 5, 6, 8, 9, 10, 11].map(IppValue::Enum).to_vec()),
+        IppValue::Array(
+            [2, 4, 5, 6, 8, 9, 10, 11, 0x39, 0x3b, 0x3c]
+                .map(IppValue::Enum)
+                .to_vec(),
+        ),
     );
     put(
         "document-format-supported",
@@ -1824,6 +2157,34 @@ fn printer_attributes(
                 .collect(),
         ),
     );
+    // PWG 5100.14 Table 5: explicit size collections and printable margins.
+    put(
+        "media-size-supported",
+        IppValue::Array(
+            caps.media_sizes
+                .iter()
+                .map(|m| {
+                    IppValue::Collection(
+                        [
+                            ("x-dimension".into(), IppValue::Integer(m.width)),
+                            ("y-dimension".into(), IppValue::Integer(m.height)),
+                        ]
+                        .into_iter()
+                        .collect(),
+                    )
+                })
+                .collect(),
+        ),
+    );
+    for name in [
+        "media-bottom-margin-supported",
+        "media-top-margin-supported",
+        "media-left-margin-supported",
+        "media-right-margin-supported",
+    ] {
+        // 6.35mm (1/4") in hundredths of a millimetre, matching media-col-*.
+        put(name, IppValue::Integer(635));
+    }
     let media_col = |name: &str| {
         let paper = caps.media_sizes.iter().find(|m| m.name == name);
         let (width, height) = paper.map(|m| (m.width, m.height)).unwrap_or((21000, 29700));
@@ -1861,16 +2222,19 @@ fn printer_attributes(
     put(
         "media-col-supported",
         keywords(&[
+            "media-bottom-margin",
+            "media-left-margin",
+            "media-right-margin",
             "media-size",
             "media-size-name",
             "media-source",
+            "media-top-margin",
             "media-type",
         ]),
     );
-    put(
-        "urf-supported",
-        keywords(&["V1.4", "W8", "SRGB24", "RS300"]),
-    );
+    // Mirrors the DNS-SD "URF" TXT key; CP1/DM1 appear only when the Windows
+    // driver reports copy/duplex support.
+    put("urf-supported", keywords(&caps.urf_features()));
     put(
         "pwg-raster-document-type-supported",
         keywords(&["sgray_8", "srgb_8"]),
@@ -3516,5 +3880,224 @@ mod tests {
         }
         assert!(std::fs::read(&output).unwrap().starts_with(b"%PDF-"));
         println!("Simulation PDF: {}", output.display());
+    }
+
+    #[test]
+    fn conformance_attribute_tables_and_operations() {
+        let server = IppServer::new("127.0.0.1", 0);
+        let p = printer("conformance queue");
+        server.add_printer(p.clone(), "pc.local.").unwrap();
+        let path = format!("/{}", p.resource_path());
+        let host = "127.0.0.1:631";
+        let uri = format!("ipp://{host}{path}");
+        let response = process(
+            &server.shared,
+            &path,
+            host,
+            req(Operation::GetPrinterAttributes, &uri),
+        );
+        // Round-trip through the wire format: exercises NoValue/dateTime tags.
+        let response = IppParser::new(IppReader::new(Cursor::new(response.to_bytes())))
+            .parse()
+            .unwrap();
+        assert_eq!(response.header().operation_or_status, 0);
+        for name in [
+            // PWG 5100.14 Table 5 (description) REQUIRED entries
+            "charset-configured",
+            "charset-supported",
+            "color-supported",
+            "compression-supported",
+            "copies-default",
+            "copies-supported",
+            "document-format-default",
+            "document-format-supported",
+            "document-password-supported",
+            "generated-natural-language-supported",
+            "identify-actions-default",
+            "identify-actions-supported",
+            "ipp-features-supported",
+            "ipp-versions-supported",
+            "job-creation-attributes-supported",
+            "job-ids-supported",
+            "media-bottom-margin-supported",
+            "media-col-database",
+            "media-col-default",
+            "media-col-ready",
+            "media-col-supported",
+            "media-default",
+            "media-left-margin-supported",
+            "media-ready",
+            "media-right-margin-supported",
+            "media-size-supported",
+            "media-source-supported",
+            "media-supported",
+            "media-top-margin-supported",
+            "media-type-supported",
+            "multiple-document-jobs-supported",
+            "multiple-operation-timeout",
+            "multiple-operation-timeout-action",
+            "natural-language-configured",
+            "operations-supported",
+            "orientation-requested-default",
+            "orientation-requested-supported",
+            "output-bin-default",
+            "output-bin-supported",
+            "overrides-supported",
+            "page-ranges-supported",
+            "pdl-override-supported",
+            "preferred-attributes-supported",
+            "print-color-mode-default",
+            "print-color-mode-supported",
+            "print-quality-default",
+            "print-quality-supported",
+            "printer-geo-location",
+            "printer-get-attributes-supported",
+            "printer-icons",
+            "printer-info",
+            "printer-location",
+            "printer-make-and-model",
+            "printer-mandatory-job-attributes",
+            "printer-name",
+            "printer-organization",
+            "printer-organizational-unit",
+            "printer-resolution-default",
+            "printer-resolution-supported",
+            "pwg-raster-document-resolution-supported",
+            "pwg-raster-document-sheet-back",
+            "pwg-raster-document-type-supported",
+            "sides-default",
+            "sides-supported",
+            "uri-authentication-supported",
+            "uri-security-supported",
+            "which-jobs-supported",
+            // PWG 5100.14 Table 7 (status) REQUIRED entries
+            "pages-per-minute",
+            "pages-per-minute-color",
+            "printer-config-change-date-time",
+            "printer-config-change-time",
+            "printer-is-accepting-jobs",
+            "printer-more-info",
+            "printer-state",
+            "printer-state-change-date-time",
+            "printer-state-change-time",
+            "printer-state-message",
+            "printer-state-reasons",
+            "printer-up-time",
+            "printer-uri-supported",
+            "printer-uuid",
+            "queued-job-count",
+            // RECOMMENDED entries that iOS explicitly polls for
+            "printer-dns-sd-name",
+            "printer-current-time",
+        ] {
+            assert!(attr(&response, name).is_some(), "Missing {name}");
+        }
+        // PWG 5100.14 Table 4: every REQUIRED operation must be advertised.
+        let Some(IppValue::Array(ops)) = attr(&response, "operations-supported") else {
+            panic!("operations-supported missing");
+        };
+        for op in [2, 4, 5, 6, 8, 9, 10, 11, 0x39, 0x3b, 0x3c] {
+            assert!(
+                ops.contains(&IppValue::Enum(op)),
+                "operation {op:#06x} not advertised"
+            );
+        }
+        assert_eq!(
+            attr(&response, "printer-dns-sd-name"),
+            Some(&IppValue::NameWithoutLanguage(p.dns_sd_name("pc.local.")))
+        );
+        assert_eq!(
+            attr(&response, "printer-mandatory-job-attributes"),
+            Some(&IppValue::NoValue)
+        );
+        // Icons and the info page must be absolute HTTP URIs on this authority.
+        let Some(IppValue::Array(icons)) = attr(&response, "printer-icons") else {
+            panic!("printer-icons missing");
+        };
+        for icon in icons {
+            let IppValue::Uri(icon) = icon else {
+                panic!("printer-icons must be URIs");
+            };
+            assert!(icon.starts_with("http://127.0.0.1:631/icons/"), "{icon}");
+        }
+        assert_eq!(
+            attr(&response, "printer-more-info"),
+            Some(&IppValue::Uri("http://127.0.0.1:631/".into()))
+        );
+    }
+
+    #[test]
+    fn close_job_cancel_my_jobs_and_identify_printer() {
+        let server = IppServer::new("127.0.0.1", 0);
+        let p = printer("operations queue");
+        server.add_printer(p.clone(), "pc.local.").unwrap();
+        let path = format!("/{}", p.resource_path());
+        let host = "127.0.0.1:631";
+        let uri = format!("ipp://{host}{path}");
+        // ipp 5.4's Operation enum lacks these codes; patch the header directly.
+        let raw = |op: u16| {
+            let mut request = req(Operation::GetPrinterAttributes, &uri);
+            request.header_mut().operation_or_status = op;
+            request
+        };
+
+        let response = process(&server.shared, &path, host, raw(0x003c));
+        assert_eq!(response.header().operation_or_status, 0);
+
+        let response = process(&server.shared, &path, host, req(Operation::CreateJob, &uri));
+        assert_eq!(response.header().operation_or_status, 0);
+        let id = job_id(&response);
+        match attr(&response, "job-uuid") {
+            Some(IppValue::Uri(uuid)) => assert!(uuid.starts_with("urn:uuid:")),
+            other => panic!("missing job-uuid: {other:?}"),
+        }
+        for name in [
+            "time-at-creation",
+            "date-time-at-creation",
+            "job-printer-up-time",
+            "job-impressions",
+            "job-impressions-completed",
+        ] {
+            assert!(attr(&response, name).is_some(), "Missing {name}");
+        }
+        assert_eq!(
+            attr(&response, "time-at-completed"),
+            Some(&IppValue::NoValue)
+        );
+
+        // Close-Job completes the empty job and reports its final state.
+        let mut close = raw(0x003b);
+        add(
+            &mut close,
+            DelimiterTag::OperationAttributes,
+            "job-id",
+            IppValue::Integer(id),
+        );
+        let response = process(&server.shared, &path, host, close);
+        assert_eq!(response.header().operation_or_status, 0);
+        assert_eq!(attr(&response, "job-state"), Some(&IppValue::Enum(9)));
+        assert!(matches!(
+            attr(&response, "time-at-completed"),
+            Some(IppValue::Integer(_))
+        ));
+
+        // Cancel-My-Jobs cancels a job still waiting for its document.
+        let response = process(&server.shared, &path, host, req(Operation::CreateJob, &uri));
+        let id = job_id(&response);
+        let response = process(&server.shared, &path, host, raw(0x0039));
+        assert_eq!(response.header().operation_or_status, 0);
+        let mut get = req(Operation::GetJobAttributes, &uri);
+        add(
+            &mut get,
+            DelimiterTag::OperationAttributes,
+            "job-id",
+            IppValue::Integer(id),
+        );
+        let response = process(&server.shared, &path, host, get);
+        assert_eq!(attr(&response, "job-state"), Some(&IppValue::Enum(7)));
+        assert_eq!(
+            attr(&response, "job-state-reasons"),
+            Some(&IppValue::Keyword("canceled-by-user".into()))
+        );
     }
 }

@@ -1,4 +1,6 @@
 use serde::{Deserialize, Serialize};
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 
 // Bump when an incompatible discovery/IPP profile change requires clients to refresh cached state.
 pub const DISCOVERY_REVISION: u8 = 7;
@@ -40,6 +42,23 @@ fn default_media_sizes() -> Vec<MediaSize> {
         height: 29700,
         windows_kind: 9,
     }]
+}
+
+impl PrinterCapabilities {
+    /// Apple URF (AirPrint raster) capability keywords for the "urf-supported"
+    /// IPP attribute and the "URF" DNS-SD TXT key. CP1 advertises copy support,
+    /// DM1 advertises duplex support; both are omitted when the driver lacks them.
+    pub fn urf_features(&self) -> Vec<&'static str> {
+        let mut features = vec!["V1.4"];
+        if self.max_copies > 1 {
+            features.push("CP1");
+        }
+        if self.duplex {
+            features.push("DM1");
+        }
+        features.extend(["W8", "SRGB24", "RS300"]);
+        features
+    }
 }
 
 impl Default for PrinterCapabilities {
@@ -93,6 +112,29 @@ impl Printer {
             "ipp/print/{}",
             uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, self.id.as_bytes()).simple()
         )
+    }
+
+    /// The DNS-SD service instance label broadcast for this printer.
+    /// Shared by mDNS registration and the IPP "printer-dns-sd-name" attribute
+    /// so clients can correlate the IPP response with the discovered service.
+    pub fn dns_sd_name(&self, hostname: &str) -> String {
+        let mut hash = DefaultHasher::new();
+        self.id.hash(&mut hash);
+        hostname.hash(&mut hash);
+        DISCOVERY_REVISION.hash(&mut hash);
+        // mdns-sd 0.11 does not escape dots in instance labels.
+        let label: String = self
+            .name
+            .chars()
+            .map(|c| {
+                if c == '.' || c == '\\' || c.is_control() {
+                    '-'
+                } else {
+                    c
+                }
+            })
+            .collect();
+        format!("{}-{:016x}", truncate_utf8(&label, 46), hash.finish())
     }
 
     pub fn uuid(&self, hostname: &str) -> String {
