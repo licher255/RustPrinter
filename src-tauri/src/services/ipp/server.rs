@@ -1,8 +1,8 @@
 use super::transport::{self, OriginMap};
-use crate::models::{Printer, PrinterStatus};
+use crate::models::{printer::MAKE_AND_MODEL, Printer, PrinterStatus};
 use crate::services::print_job::{self, PrintOptions, FORMATS};
 use ipp::attribute::{IppAttribute, IppAttributeGroup};
-use ipp::model::{DelimiterTag, IppVersion, StatusCode};
+use ipp::model::{DelimiterTag, IppVersion, StatusCode, ValueTag};
 use ipp::parser::IppParser;
 use ipp::reader::IppReader;
 use ipp::request::IppRequestResponse;
@@ -13,10 +13,10 @@ use std::net::{IpAddr, SocketAddr, TcpListener};
 use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering},
-    Arc, Mutex,
+    Arc, Mutex, OnceLock,
 };
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use tiny_http::{Header, Response, Server};
 
 macro_rules! trace {
@@ -25,6 +25,7 @@ macro_rules! trace {
 
 const DEFAULT_PRINT_PATH: &str = "/ipp/print";
 static NEXT_JOB_ID: AtomicI32 = AtomicI32::new(1);
+static STATIC_RESOURCE_LAST_MODIFIED: OnceLock<String> = OnceLock::new();
 const MAX_UPLOAD: u64 = 64 * 1024 * 1024;
 type Backend = fn(&str, &[u8], &str, &PrintOptions, &AtomicBool) -> Result<i32, String>;
 
@@ -327,6 +328,35 @@ impl IppServer {
             remote_addr,
             request.secure()
         );
+        let host_headers: Vec<_> = request
+            .headers()
+            .iter()
+            .filter(|header| header.field.equiv("Host"))
+            .collect();
+        let host = host_headers
+            .first()
+            .map(|header| header.value.as_str())
+            .unwrap_or("");
+        let hostnames: Vec<String> = shared
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .printers
+            .values()
+            .map(|(_, hostname)| hostname.clone())
+            .collect();
+        let valid_any_host = host_headers.len() == 1
+            && if hostnames.is_empty() {
+                valid_host(host, "", port)
+            } else {
+                hostnames
+                    .iter()
+                    .any(|hostname| valid_host(host, hostname, port))
+            };
+        if !valid_any_host {
+            trace!("[IPP] rejecting request: invalid or missing Host header");
+            let _ = request.respond(Response::empty(400));
+            return;
+        }
         let mut has_receive_header = false;
         let mut invalid_receive_header = false;
         for header in request.headers() {
@@ -349,11 +379,21 @@ impl IppServer {
         }
         #[cfg(debug_assertions)]
         if request.method() == &tiny_http::Method::Get && request.url() == "/debug/test.jpg" {
+            let last_modified = static_resource_last_modified();
+            if is_not_modified_since(request.headers(), last_modified) {
+                let _ = request.respond(
+                    Response::empty(304)
+                        .with_header(Header::from_bytes("Last-Modified", last_modified).unwrap()),
+                );
+                return;
+            }
             let _ = request.respond(
                 Response::from_data(
                     include_bytes!("../../../tests/fixtures/quadrants.jpg").to_vec(),
                 )
-                .with_header(Header::from_bytes("Content-Type", "image/jpeg").unwrap()),
+                .with_header(Header::from_bytes("Content-Type", "image/jpeg").unwrap())
+                .with_header(Header::from_bytes("Last-Modified", last_modified).unwrap())
+                .with_header(Header::from_bytes("Cache-Control", "max-age=86400").unwrap()),
             );
             return;
         }
@@ -433,11 +473,27 @@ impl IppServer {
                     let _ = request.respond(Response::empty(404));
                     return;
                 };
+                let last_modified = static_resource_last_modified();
+                if is_not_modified_since(request.headers(), last_modified) {
+                    let _ = request.respond(
+                        Response::empty(304)
+                            .with_header(
+                                Header::from_bytes("Last-Modified", last_modified).unwrap(),
+                            )
+                            .with_header(
+                                Header::from_bytes("Cache-Control", "max-age=86400").unwrap(),
+                            ),
+                    );
+                    return;
+                }
                 // Cacheable per PWG 5100.14 section 5.1.3.
                 let _ = request.respond(
                     Response::from_data(bytes.to_vec())
                         .with_header(Header::from_bytes("Content-Type", "image/png").unwrap())
-                        .with_header(Header::from_bytes("Cache-Control", "max-age=86400").unwrap()),
+                        .with_header(Header::from_bytes("Cache-Control", "max-age=86400").unwrap())
+                        .with_header(
+                            Header::from_bytes("Last-Modified", last_modified).unwrap(),
+                        ),
                 );
                 return;
             }
@@ -692,6 +748,23 @@ fn receive_page(shared: &Shared) -> Option<(String, String)> {
     ))
 }
 
+fn static_resource_last_modified() -> &'static str {
+    STATIC_RESOURCE_LAST_MODIFIED
+        .get_or_init(|| httpdate::fmt_http_date(SystemTime::now()))
+        .as_str()
+}
+
+fn is_not_modified_since(headers: &[Header], last_modified: &str) -> bool {
+    let Ok(modified) = httpdate::parse_http_date(last_modified) else {
+        return false;
+    };
+    headers
+        .iter()
+        .find(|header| header.field.equiv("If-Modified-Since"))
+        .and_then(|header| httpdate::parse_http_date(header.value.as_str()).ok())
+        .is_some_and(|since| modified <= since)
+}
+
 fn escape_html_attribute(value: &str) -> String {
     value
         .replace('&', "&amp;")
@@ -844,6 +917,12 @@ fn keywords(values: &[&str]) -> IppValue {
             .collect(),
     )
 }
+fn unknown() -> IppValue {
+    IppValue::Other {
+        tag: ValueTag::Unknown as u8,
+        data: Default::default(),
+    }
+}
 
 /// RFC 8011 dateTime in UTC (utc_dir '+', zero offset is always valid).
 fn ipp_datetime(at: std::time::SystemTime) -> IppValue {
@@ -918,6 +997,18 @@ fn options(
     printer: &Printer,
     base: Option<&PrintOptions>,
 ) -> Result<PrintOptions, StatusCode> {
+    // PDF is advertised, but this bridge has no document decryption path.
+    // The corresponding supported value is zero, so never silently discard a password.
+    if let Some(password) = attr(req, "document-password") {
+        if !matches!(password, IppValue::OctetString(value) if value.is_empty()) {
+            return Err(StatusCode::ClientErrorAttributesOrValuesNotSupported);
+        }
+    }
+    // PWG 5100.14 section 9.3 requires PDF overrides. The Windows submission
+    // path cannot apply per-document overrides, so reject them rather than lose intent.
+    if attr(req, "overrides").is_some() {
+        return Err(StatusCode::ClientErrorAttributesOrValuesNotSupported);
+    }
     let mut options = base.cloned().unwrap_or_else(|| PrintOptions {
         media: printer.capabilities.default_media.clone(),
         ..Default::default()
@@ -1922,17 +2013,14 @@ fn printer_attributes(
         "multiple-operation-timeout-action",
         IppValue::Keyword("abort-job".into()),
     );
-    put(
-        "overrides-supported",
-        keywords(&["document-numbers", "pages"]),
-    );
     put("identify-actions-default", keywords(&["display"]));
     put("identify-actions-supported", keywords(&["display"]));
     // iOS requests this on every status poll; nothing is mandatory here.
     put("printer-mandatory-job-attributes", IppValue::NoValue);
     // PWG 5100.14 Table 7: status attributes.
-    put("pages-per-minute", IppValue::Integer(1));
-    put("pages-per-minute-color", IppValue::Integer(1));
+    // Speed is driver and media dependent; this bridge has no measured value.
+    put("pages-per-minute", unknown());
+    put("pages-per-minute-color", unknown());
     put("printer-config-change-time", IppValue::Integer(1));
     put(
         "printer-config-change-date-time",
@@ -1965,9 +2053,10 @@ fn printer_attributes(
         ),
     );
     put("printer-kind", keywords(&["document"]));
+    // DriverName identifies software, not necessarily the physical device model.
     put(
         "printer-make-and-model",
-        IppValue::TextWithoutLanguage(printer.name.clone()),
+        IppValue::TextWithoutLanguage(MAKE_AND_MODEL.into()),
     );
     put(
         "printer-state",
@@ -2004,7 +2093,10 @@ fn printer_attributes(
     );
     put("ipp-versions-supported", keywords(&["1.1", "2.0"]));
     // iOS/iPadOS 的系统打印对话框要求该标记才会列出打印机（见 AGENTS.md）。
-    put("ipp-features-supported", keywords(&["ipp-everywhere"]));
+    put(
+        "ipp-features-supported",
+        keywords(&["ipp-everywhere", "ipp-everywhere-server"]),
+    );
     // PWG 5100.14 Table 4: includes Cancel-My-Jobs (0x0039), Close-Job
     // (0x003B) and Identify-Printer (0x003C).
     put(
@@ -2182,8 +2274,9 @@ fn printer_attributes(
         "media-left-margin-supported",
         "media-right-margin-supported",
     ] {
-        // 6.35mm (1/4") in hundredths of a millimetre, matching media-col-*.
-        put(name, IppValue::Integer(635));
+        // The selected Windows driver supplies the actual printable margins;
+        // they are not currently queried by the bridge.
+        put(name, unknown());
     }
     let media_col = |name: &str| {
         let paper = caps.media_sizes.iter().find(|m| m.name == name);
@@ -2204,10 +2297,10 @@ fn printer_attributes(
                 ("media-size-name".into(), IppValue::Keyword(name.into())),
                 ("media-source".into(), IppValue::Keyword("auto".into())),
                 ("media-type".into(), IppValue::Keyword("stationery".into())),
-                ("media-top-margin".into(), IppValue::Integer(635)),
-                ("media-bottom-margin".into(), IppValue::Integer(635)),
-                ("media-left-margin".into(), IppValue::Integer(635)),
-                ("media-right-margin".into(), IppValue::Integer(635)),
+                ("media-top-margin".into(), unknown()),
+                ("media-bottom-margin".into(), unknown()),
+                ("media-left-margin".into(), unknown()),
+                ("media-right-margin".into(), unknown()),
             ]
             .into_iter()
             .collect(),
@@ -2316,6 +2409,46 @@ mod tests {
         );
         request
     }
+
+    #[test]
+    fn unsupported_pdf_password_and_overrides_are_rejected_after_wire_roundtrip() {
+        let server = IppServer::new("127.0.0.1", 0);
+        let p = printer("pdf options queue");
+        server.add_printer(p.clone(), "pc.local.").unwrap();
+        let path = format!("/{}", p.resource_path());
+        let host = "127.0.0.1:631";
+        let uri = format!("ipp://{host}{path}");
+
+        for (name, value) in [
+            (
+                "document-password",
+                IppValue::OctetString("secret".into()),
+            ),
+            (
+                "overrides",
+                IppValue::Collection(
+                    [("pages".into(), IppValue::Integer(1))]
+                        .into_iter()
+                        .collect(),
+                ),
+            ),
+        ] {
+            let mut request = req(Operation::ValidateJob, &uri);
+            add(&mut request, DelimiterTag::JobAttributes, name, value);
+            let request = IppParser::new(IppReader::new(Cursor::new(request.to_bytes())))
+                .parse()
+                .unwrap();
+            let response = process(&server.shared, &path, host, request);
+            let response = IppParser::new(IppReader::new(Cursor::new(response.to_bytes())))
+                .parse()
+                .unwrap();
+            assert_eq!(
+                response.header().operation_or_status,
+                StatusCode::ClientErrorAttributesOrValuesNotSupported as u16,
+                "{name} must not be silently ignored"
+            );
+        }
+    }
     fn job_id(response: &IppRequestResponse) -> i32 {
         match attr(response, "job-id").unwrap() {
             IppValue::Integer(id) => *id,
@@ -2417,13 +2550,27 @@ mod tests {
     }
 
     fn http_get(address: &str, path: &str, host: &str) -> (u16, Vec<u8>) {
+        let (status, _, body) = http_get_with_headers(address, path, host, &[]);
+        (status, body)
+    }
+
+    fn http_get_with_headers(
+        address: &str,
+        path: &str,
+        host: &str,
+        headers: &[(&str, &str)],
+    ) -> (u16, String, Vec<u8>) {
         let mut socket = TcpStream::connect(address).unwrap();
         socket
             .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();
+        let extra_headers = headers
+            .iter()
+            .map(|(name, value)| format!("{name}: {value}\r\n"))
+            .collect::<String>();
         write!(
             socket,
-            "GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"
+            "GET {path} HTTP/1.1\r\nHost: {host}\r\n{extra_headers}Connection: close\r\n\r\n"
         )
         .unwrap();
         let mut response = Vec::new();
@@ -2439,7 +2586,42 @@ mod tests {
             .unwrap()
             .parse()
             .unwrap();
-        (status, response[boundary + 4..].to_vec())
+        let response_headers = std::str::from_utf8(&response[..boundary])
+            .unwrap()
+            .to_string();
+        (status, response_headers, response[boundary + 4..].to_vec())
+    }
+
+    #[test]
+    fn icon_supports_last_modified_conditional_get_and_validates_host() {
+        let mut server = IppServer::new("127.0.0.1", 0);
+        server
+            .add_printer(printer("icon host"), "pc.local.")
+            .unwrap();
+        server.start().unwrap();
+        let address = server.address.clone();
+        let (status, headers, body) =
+            http_get_with_headers(&address, "/icons/32.png", &address, &[]);
+        assert_eq!(status, 200);
+        assert!(!body.is_empty());
+        let last_modified = headers
+            .lines()
+            .find_map(|line| line.strip_prefix("Last-Modified: "))
+            .expect("static resource must have Last-Modified");
+        assert!(httpdate::parse_http_date(last_modified).is_ok());
+        let (status, headers, body) = http_get_with_headers(
+            &address,
+            "/icons/32.png",
+            &address,
+            &[("If-Modified-Since", last_modified)],
+        );
+        assert_eq!(status, 304);
+        assert!(body.is_empty());
+        assert!(headers.to_ascii_lowercase().contains("last-modified:"));
+        assert_eq!(
+            http_get(&address, "/icons/32.png", "evil.example:631").0,
+            400
+        );
     }
 
     #[test]
@@ -3712,7 +3894,7 @@ mod tests {
         );
         assert_eq!(
             attr(&response, "printer-make-and-model"),
-            Some(&IppValue::TextWithoutLanguage(p.name.clone()))
+            Some(&IppValue::TextWithoutLanguage(MAKE_AND_MODEL.into()))
         );
 
         let mut request = req(Operation::GetPrinterAttributes, &uri);
@@ -3901,6 +4083,10 @@ mod tests {
             .parse()
             .unwrap();
         assert_eq!(response.header().operation_or_status, 0);
+        assert_eq!(
+            attr(&response, "ipp-features-supported"),
+            Some(&keywords(&["ipp-everywhere", "ipp-everywhere-server"]))
+        );
         for name in [
             // PWG 5100.14 Table 5 (description) REQUIRED entries
             "charset-configured",
@@ -3942,7 +4128,6 @@ mod tests {
             "orientation-requested-supported",
             "output-bin-default",
             "output-bin-supported",
-            "overrides-supported",
             "page-ranges-supported",
             "pdl-override-supported",
             "preferred-attributes-supported",
@@ -4010,6 +4195,31 @@ mod tests {
             attr(&response, "printer-mandatory-job-attributes"),
             Some(&IppValue::NoValue)
         );
+        assert_eq!(attr(&response, "overrides-supported"), None);
+        let unknown = IppValue::Other {
+            tag: ValueTag::Unknown as u8,
+            data: Default::default(),
+        };
+        assert_eq!(attr(&response, "pages-per-minute"), Some(&unknown));
+        assert_eq!(
+            attr(&response, "pages-per-minute-color"),
+            Some(&unknown)
+        );
+        assert_eq!(
+            attr(&response, "printer-make-and-model"),
+            Some(&IppValue::TextWithoutLanguage(MAKE_AND_MODEL.into()))
+        );
+        let Some(IppValue::Collection(media)) = attr(&response, "media-col-default") else {
+            panic!("media-col-default missing");
+        };
+        for name in [
+            "media-top-margin",
+            "media-bottom-margin",
+            "media-left-margin",
+            "media-right-margin",
+        ] {
+            assert_eq!(media.get(name), Some(&unknown), "{name}");
+        }
         // Icons and the info page must be absolute HTTP URIs on this authority.
         let Some(IppValue::Array(icons)) = attr(&response, "printer-icons") else {
             panic!("printer-icons missing");
