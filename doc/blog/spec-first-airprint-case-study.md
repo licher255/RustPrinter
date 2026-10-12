@@ -1,5 +1,7 @@
 # The Simple Printer Feature That Took Nearly 800 Million Tokens
 
+![The 800M-Token Printer — how specification-first engineering finally worked](../assets/800m-token-printer-case-study.png)
+
 ## A specification-first case study in AI-assisted engineering
 
 AirPrinter began with an ordinary household problem: an older USB printer still worked, but it had no useful network-sharing feature for iPhone, iPad, or Mac. The printer was already connected to a Windows PC, and the home router could carry the network traffic. In principle, the missing piece was small: advertise the Windows queue on the local network, receive an AirPrint-compatible IPP job, and send it to the installed Windows driver.

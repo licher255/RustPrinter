@@ -2,7 +2,9 @@
 
 [View the HTML project documentation](doc/index.html)
 
-[Read the engineering case study: *The Simple Printer Feature That Took Nearly 800 Million Tokens*](doc/blog/spec-first-airprint-case-study.md)
+[![The 800M-Token Printer — how specification-first engineering finally worked](doc/assets/800m-token-printer-case-study.png)](doc/blog/spec-first-airprint-case-study.md)
+
+**[Read the engineering case study: *The Simple Printer Feature That Took Nearly 800 Million Tokens*](doc/blog/spec-first-airprint-case-study.md)**
 
 The current stable release is **2.0.0.stable**. The installer uses the SemVer-compatible version `2.0.0`. The `main` branch uses the direct-broadcast design, which has been tested with a physical printer: each installed Windows printer queue (USB, wired network, or paired Windows queue) is advertised to the local network. Each shared queue has its own discovery identity and IPP resource path, and received jobs are sent directly to the matching Windows queue. The first successful physical-print snapshot is preserved as `v1.0.0`; the fixed virtual-entry design is retained on the `virtual-gateway-printer` branch.
 
