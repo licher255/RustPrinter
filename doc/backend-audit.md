@@ -152,3 +152,13 @@
   - DNS-SD：URF 键与 `urf-supported` 改为按驱动能力动态生成（双面加 DM1、多份加 CP1）；IPP/IPPS 服务新增 `adminurl`；`ty` 截断收紧到64字节以保持 TXT ≤400 字节（测试守护）。
 - 已知遗留偏差：mdns-sd 0.11 每个实例只能注册一个子类型，无法同时发布规范 4.2.1 要求的 `_print._sub._ipp._tcp`（保留 Apple 实际使用的 `_universal._sub`，手机发现已被日志证实）；4.2.3 的 LOC 记录 mdns-sd 不支持；`printer-strings-uri`（RECOMMENDED）与耗材属性（条件必需）继续省略。
 - 验证：库测试 36 passed / 0 failed / 4 ignored（新增 `conformance_attribute_tables_and_operations` 与 `close_job_cancel_my_jobs_and_identify_printer`，响应经线上格式序列化回放校验）；`cargo check --all-targets` 通过。手机系统打印面板是否因此进入提交阶段仍需实机复测。
+
+## 规范复审与双方案分支（2026-10-12）
+
+- 两个方案分别在 `direct-printer-broadcast` 与 `virtual-gateway-printer`；共同 IPP/DNS-SD 层的代码相同，但直接广播按队列独立 URI，虚拟入口按接收时的目标快照路由。条款、验收门槛和未完成项见 `conformance-plan.md`。
+- 复查 PWG 5100.14 §4.2.2：DNS-SD 实例名默认不再附加队列 ID 哈希。发布前拒绝与本进程现有实例同名的队列，避免 `mdns-sd` 按 fullname 覆盖旧记录；碰撞后自动改名尚未实现。
+- 复查 §5.1：所有 HTTP 请求入口统一验证唯一 Host；静态图标支持 Last-Modified、If-Modified-Since 和 304，IPP 正常 POST 响应维持 `Cache-Control: no-cache`。
+- 复查 §7.1：PC 软件桥接器按逻辑设备发布 `ipp-everywhere-server`。IPP `printer-make-and-model` 与 DNS-SD `ty`/`product` 统一为软件型号 `AirPrinter Windows Print Bridge`，不再把 Windows 队列名当作实体型号。未知的速度和可打印边距使用 IPP `unknown` (0x12)，不再发布未经测量的 1 ppm / 6.35 mm；未配置的值仍按语义使用 `no-value`。
+- 复查 §9.3：此前 `overrides-supported` 声称支持页级覆盖，但作业流程没有执行它。现已撤销该虚假声明并拒绝客户端 `overrides`；非空 `document-password` 同样明确拒绝，不再静默忽略。**PDF 条件必需的 overrides 仍未实现，故不符合完整 IPP Everywhere 1.1。**
+- 当前 `mdns-sd 0.11.5` 每个服务实例只能持有一个 subtype；对相同 fullname 再注册会替换已有记录。因此 `_universal` 之外的 `_print` 子类型及 §4.2.3 LOC/手动位置配置仍未完成，不能以属性表测试宣称完整规范符合性。
+- 直接广播分支本轮验证：Rust 库测试 **38 passed / 0 failed / 4 ignored**；`cargo check --all-targets --locked` 与 `pnpm build` 通过。测试中的回环监听使用正常主机权限；没有从真实 Apple 系统打印面板完成文件提交或实体出纸，本轮不发布正式版本。

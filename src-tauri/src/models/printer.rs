@@ -1,10 +1,9 @@
 use serde::{Deserialize, Serialize};
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 
 // Bump when an incompatible discovery/IPP profile change requires clients to refresh cached state.
 pub const DISCOVERY_REVISION: u8 = 7;
 pub const GATEWAY_PRINTER_ID: &str = "airprinter-gateway";
+pub const MAKE_AND_MODEL: &str = "AirPrinter Windows Print Bridge";
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Printer {
@@ -117,11 +116,7 @@ impl Printer {
     /// The DNS-SD service instance label broadcast for this printer.
     /// Shared by mDNS registration and the IPP "printer-dns-sd-name" attribute
     /// so clients can correlate the IPP response with the discovered service.
-    pub fn dns_sd_name(&self, hostname: &str) -> String {
-        let mut hash = DefaultHasher::new();
-        self.id.hash(&mut hash);
-        hostname.hash(&mut hash);
-        DISCOVERY_REVISION.hash(&mut hash);
+    pub fn dns_sd_name(&self, _hostname: &str) -> String {
         // mdns-sd 0.11 does not escape dots in instance labels.
         let label: String = self
             .name
@@ -134,7 +129,7 @@ impl Printer {
                 }
             })
             .collect();
-        format!("{}-{:016x}", truncate_utf8(&label, 46), hash.finish())
+        truncate_utf8(&label, 63).to_string()
     }
 
     pub fn uuid(&self, hostname: &str) -> String {
@@ -170,6 +165,24 @@ mod tests {
         assert_eq!(printer.resource_path().len(), 42);
         assert!(printer.resource_path().is_ascii());
         assert_eq!(printer.clone().resource_path(), printer.resource_path());
+    }
+
+    #[test]
+    fn dns_sd_instance_name_uses_printer_name_without_default_identifier() {
+        let printer = Printer {
+            name: "Office.Printer".into(),
+            id: "queue-unique-id".into(),
+            status: PrinterStatus::Online,
+            capabilities: PrinterCapabilities::default(),
+        };
+        assert_eq!(printer.dns_sd_name("pc.local."), "Office-Printer");
+
+        let long_name = Printer {
+            name: "打印机".repeat(30),
+            ..printer
+        };
+        assert_eq!(long_name.dns_sd_name("pc.local.").len(), 63);
+        assert!(long_name.dns_sd_name("pc.local.").is_char_boundary(63));
     }
 
     #[test]

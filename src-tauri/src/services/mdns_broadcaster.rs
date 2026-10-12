@@ -1,4 +1,5 @@
 use crate::models::{printer::truncate_utf8, Printer};
+use crate::models::printer::MAKE_AND_MODEL;
 use mdns_sd::{DaemonEvent, IfKind, ServiceDaemon, ServiceInfo};
 use std::collections::{hash_map::DefaultHasher, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
@@ -76,8 +77,8 @@ impl MdnsBroadcaster {
             ("air", "none".to_string()),
             // 64 bytes keeps the whole TXT record within the 400-octet mDNS
             // budget (PWG 5100.14 section 4.2.4) once "adminurl" is included.
-            ("ty", truncate_utf8(&printer.name, 64).to_string()),
-            ("product", format!("({})", truncate_utf8(&printer.name, 32))),
+            ("ty", truncate_utf8(MAKE_AND_MODEL, 64).to_string()),
+            ("product", format!("({})", truncate_utf8(MAKE_AND_MODEL, 32))),
             ("kind", "document".to_string()),
             ("priority", "0".to_string()),
             (
@@ -156,6 +157,21 @@ impl MdnsBroadcaster {
         Ok(services)
     }
 
+    fn fullname_conflicts(
+        registrations: &HashMap<String, Vec<String>>,
+        services: &[ServiceInfo],
+    ) -> bool {
+        services.iter().any(|service| {
+            registrations
+                .values()
+                .any(|fullnames| {
+                    fullnames
+                        .iter()
+                        .any(|name| name.eq_ignore_ascii_case(service.get_fullname()))
+                })
+        })
+    }
+
     pub fn broadcast_airprint(&mut self, printer: &Printer, port: u16) -> Result<(), String> {
         self.broadcast_with_tls(printer, port, None)
     }
@@ -172,6 +188,9 @@ impl MdnsBroadcaster {
         // A subtype's PTR targets the base _ipp instance. Register it ONCE, not
         // as a second service with a different SRV target (which overwrites it).
         let services = Self::service_infos(printer, &self.hostname, port, secure_port)?;
+        if Self::fullname_conflicts(&self.registrations, &services) {
+            return Err("Another shared printer already uses this DNS-SD instance name".into());
+        }
         let mut fullnames: Vec<String> = Vec::new();
         let events = self.daemon.monitor().map_err(|e| e.to_string())?;
         for info in services {
@@ -287,7 +306,7 @@ mod tests {
         );
         assert_eq!(
             info.get_property_val_str("product"),
-            Some(format!("({})", truncate_utf8(&printer.name, 32)).as_str())
+            Some(format!("({})", truncate_utf8(MAKE_AND_MODEL, 32)).as_str())
         );
         let txt_bytes: usize = info
             .get_properties()
@@ -314,6 +333,31 @@ mod tests {
         );
         assert_eq!(secure.get_property_val_str("TLS"), Some("1.2"));
         assert_eq!(info.get_property_val_str("TLS"), None);
+    }
+
+    #[test]
+    fn duplicate_instance_names_are_rejected_before_registration() {
+        let first = Printer {
+            id: "queue-one".into(),
+            name: "Office Printer".into(),
+            status: PrinterStatus::Online,
+            capabilities: Default::default(),
+        };
+        let second = Printer {
+            id: "queue-two".into(),
+            name: "office printer".into(),
+            ..first.clone()
+        };
+        let existing = MdnsBroadcaster::service_infos(&first, "pc.local.", 631, None).unwrap();
+        let candidate = MdnsBroadcaster::service_infos(&second, "pc.local.", 632, None).unwrap();
+        let registrations = HashMap::from([(
+            first.id,
+            existing
+                .iter()
+                .map(|service| service.get_fullname().to_string())
+                .collect(),
+        )]);
+        assert!(MdnsBroadcaster::fullname_conflicts(&registrations, &candidate));
     }
 
     #[test]
@@ -357,7 +401,7 @@ mod tests {
                 a.get_property_val_str("UUID"),
                 b.get_property_val_str("UUID")
             );
-            assert_eq!(a.get_property_val_str("ty"), Some("AirPrinter"));
+            assert_eq!(a.get_property_val_str("ty"), Some(MAKE_AND_MODEL));
         }
         assert_eq!(services_a[0].get_property_val_str("Color"), Some("T"));
         assert_eq!(services_b[0].get_property_val_str("Color"), Some("F"));

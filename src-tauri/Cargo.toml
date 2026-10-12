@@ -29,6 +29,7 @@ tiny_http = { version = "0.12", features = ["ssl-rustls"] }
 rcgen = "0.13.2"
 rand = "0.8"
 ipp = "5.4.0"
+httpdate = "1"
 tempfile = "3.10"
 lazy_static = "1.4" 
 uuid = { version = "1", features = ["v5"] }
