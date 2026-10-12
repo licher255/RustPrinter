@@ -1,6 +1,7 @@
 use crate::models::AppSettings;
+use std::ffi::OsString;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Loads and persists user settings as JSON in the app config directory.
 pub struct SettingsStore {
@@ -23,10 +24,7 @@ impl SettingsStore {
         self.settings.clone()
     }
 
-    pub fn update(
-        &mut self,
-        apply: impl FnOnce(&mut AppSettings),
-    ) -> Result<AppSettings, String> {
+    pub fn update(&mut self, apply: impl FnOnce(&mut AppSettings)) -> Result<AppSettings, String> {
         let mut next = self.settings.clone();
         apply(&mut next);
         self.save(&next)?;
@@ -46,6 +44,14 @@ impl SettingsStore {
     }
 }
 
+#[cfg(target_os = "windows")]
+fn autostart_command(executable: &Path) -> OsString {
+    let mut command = OsString::from("\"");
+    command.push(executable.as_os_str());
+    command.push("\" --background");
+    command
+}
+
 /// Enables or disables logon autostart via the per-user Run registry key.
 #[cfg(target_os = "windows")]
 pub fn apply_autostart(enable: bool) -> Result<(), String> {
@@ -57,17 +63,10 @@ pub fn apply_autostart(enable: bool) -> Result<(), String> {
     let mut command = std::process::Command::new("reg.exe");
     if enable {
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-        command.args([
-            "add",
-            KEY,
-            "/v",
-            VALUE,
-            "/t",
-            "REG_SZ",
-            "/d",
-            &exe.to_string_lossy(),
-            "/f",
-        ]);
+        command
+            .args(["add", KEY, "/v", VALUE, "/t", "REG_SZ", "/d"])
+            .arg(autostart_command(&exe))
+            .arg("/f");
     } else {
         command.args(["delete", KEY, "/v", VALUE, "/f"]);
     }
@@ -120,5 +119,14 @@ mod tests {
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(raw["autostart"], true);
         assert_eq!(raw["language"], "zh");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn autostart_uses_background_mode_and_quotes_the_executable() {
+        assert_eq!(
+            autostart_command(Path::new(r"C:\Program Files\AirPrinter\AirPrinter.exe")),
+            OsString::from(r#""C:\Program Files\AirPrinter\AirPrinter.exe" --background"#)
+        );
     }
 }

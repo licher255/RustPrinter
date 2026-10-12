@@ -46,11 +46,11 @@ export class PrinterList {
           </div>
           <div class="flex items-center gap-2">
             <button id="enable-lan-btn" class="btn-apple" type="button">
-              <i class="fa-solid fa-shield-halved"></i>
+              <i class="fa-solid fa-shield-halved" aria-hidden="true"></i>
               <span id="enable-lan-text"></span>
             </button>
             <button id="refresh-btn" class="btn-icon" type="button">
-              <i class="fa-solid fa-rotate" id="refresh-icon"></i>
+              <i class="fa-solid fa-rotate" id="refresh-icon" aria-hidden="true"></i>
             </button>
           </div>
         </div>
@@ -75,7 +75,10 @@ export class PrinterList {
     if (loadingTextEl) loadingTextEl.textContent = i18n.t("common.loading");
     if (enableLanEl) enableLanEl.textContent = i18n.t("actions.enable_lan_access");
     if (scopeNoteEl) scopeNoteEl.textContent = i18n.t("network.lan_access_scope");
-    if (refreshBtn) refreshBtn.setAttribute("title", i18n.t("actions.refresh"));
+    if (refreshBtn) {
+      refreshBtn.setAttribute("title", i18n.t("actions.refresh"));
+      refreshBtn.setAttribute("aria-label", i18n.t("actions.refresh"));
+    }
   }
 
   private bindEvents() {
@@ -150,6 +153,7 @@ export class PrinterList {
             type="checkbox"
             class="toggle toggle-primary share-toggle"
             data-id="${escapeHtml(p.id)}"
+            aria-label="${escapeHtml(`${i18n.t(isShared ? "actions.stop_sharing" : "actions.share")}: ${p.name}`)}"
             ${isShared ? "checked" : ""}
             ${disabled ? "disabled" : ""}
           />

@@ -15,28 +15,52 @@
         <span class="titlebar-title">AirPrinter</span>
       </div>
       <div class="titlebar-controls" id="titlebar-controls">
-        <button id="win-min" class="titlebar-btn" data-i18n-title="window.minimize" title="Minimize">
-          <i class="fa-solid fa-minus"></i>
+        <button id="win-min" class="titlebar-btn" data-i18n-title="window.minimize" data-i18n-aria-label="window.minimize" title="Minimize" aria-label="Minimize">
+          <i class="fa-solid fa-minus" aria-hidden="true"></i>
         </button>
-        <button id="win-max" class="titlebar-btn" data-i18n-title="window.maximize" title="Maximize">
-          <i class="fa-regular fa-square"></i>
+        <button id="win-max" class="titlebar-btn" data-i18n-title="window.maximize" data-i18n-aria-label="window.maximize" title="Maximize" aria-label="Maximize">
+          <i class="fa-regular fa-square" aria-hidden="true"></i>
         </button>
-        <button id="win-close" class="titlebar-btn titlebar-close" data-i18n-title="window.close" title="Close">
-          <i class="fa-solid fa-xmark"></i>
+        <button id="win-close" class="titlebar-btn titlebar-close" data-i18n-title="window.close" data-i18n-aria-label="window.close" title="Close" aria-label="Close">
+          <i class="fa-solid fa-xmark" aria-hidden="true"></i>
         </button>
       </div>
     </div>
 
-    <main id="content">
-      <!-- 打印机列表（组件挂载点） -->
-      <div id="printer-list-container"></div>
+    <div id="app-shell">
+      <aside id="sidebar">
+        <nav class="sidebar-nav" aria-label="Main navigation" data-i18n-aria-label="nav.label" role="tablist" aria-orientation="vertical">
+          <button class="nav-item active" type="button" role="tab" id="nav-printers" aria-selected="true" aria-controls="view-printers" data-view="printers">
+            <i class="fa-solid fa-print" aria-hidden="true"></i>
+            <span data-i18n="nav.printers">Printers</span>
+          </button>
+          <button class="nav-item" type="button" role="tab" id="nav-logs" aria-selected="false" aria-controls="view-logs" data-view="logs" tabindex="-1">
+            <i class="fa-solid fa-terminal" aria-hidden="true"></i>
+            <span data-i18n="nav.logs">Logs</span>
+          </button>
+          <button class="nav-item" type="button" role="tab" id="nav-settings" aria-selected="false" aria-controls="view-settings" data-view="settings" tabindex="-1">
+            <i class="fa-solid fa-sliders" aria-hidden="true"></i>
+            <span data-i18n="nav.settings">Settings</span>
+          </button>
+        </nav>
+        <div class="sidebar-footer" aria-hidden="true">
+          <img src="/logo.png" class="sidebar-footer-logo" alt="" />
+          AirPrinter
+        </div>
+      </aside>
 
-      <!-- 设置（组件挂载点） -->
-      <div id="settings-container"></div>
-
-      <!-- 日志面板（组件挂载点） -->
-      <div id="log-panel-container"></div>
-    </main>
+      <main id="content">
+        <section id="view-printers" class="app-view" role="tabpanel" aria-labelledby="nav-printers" tabindex="0">
+          <div id="printer-list-container"></div>
+        </section>
+        <section id="view-logs" class="app-view" role="tabpanel" aria-labelledby="nav-logs" tabindex="0" hidden>
+          <div id="log-panel-container"></div>
+        </section>
+        <section id="view-settings" class="app-view" role="tabpanel" aria-labelledby="nav-settings" tabindex="0" hidden>
+          <div id="settings-container"></div>
+        </section>
+      </main>
+    </div>
 
     <script type="module" src="/src/main.ts"></script>
   </body>

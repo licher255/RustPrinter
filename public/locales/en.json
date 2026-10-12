@@ -2,6 +2,12 @@
   "app": {
     "title": "🖨️ AirPrinter"
   },
+  "nav": {
+    "label": "Main navigation",
+    "printers": "Printers",
+    "logs": "Logs",
+    "settings": "Settings"
+  },
   "printers": {
     "title": "Printers",
     "no_printers": "No shareable physical printers found. Install the Windows driver and connect your printer, then refresh."
@@ -61,9 +67,9 @@
     "title": "Settings",
     "language": "Language",
     "close_to_tray": "Keep running in the system tray",
-    "close_to_tray_hint": "Closing the window hides the app; sharing stays active. Quit from the tray icon.",
+    "close_to_tray_hint": "Closing releases the interface; sharing stays active. Reopen or quit from the tray icon.",
     "autostart": "Launch at Windows startup",
-    "autostart_hint": "Start AirPrinter automatically when you sign in."
+    "autostart_hint": "Start AirPrinter in lightweight background mode when you sign in."
   },
   "window": {
     "minimize": "Minimize",

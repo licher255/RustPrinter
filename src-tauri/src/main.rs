@@ -1,10 +1,11 @@
 // Windows queue bridge: DNS-SD discovery and IPP transport.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use std::ffi::OsString;
+use std::path::PathBuf;
 use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
-use std::path::PathBuf;
 use tauri::Manager;
 
 use airprinter::services::{AirPrintServer, PrinterDetector};
@@ -16,14 +17,19 @@ use airprinter::commands::{
     set_close_to_tray, set_language, share_printer, stop_printer, unshare_printer, AppState,
 };
 
+const FOREGROUND_RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
+const BACKGROUND_RECONCILE_INTERVAL: Duration = Duration::from_secs(300);
+
 fn main() {
-    let receive_only_dir = match receive_only_directory() {
-        Ok(directory) => directory,
+    let startup = match startup_options() {
+        Ok(options) => options,
         Err(error) => {
             eprintln!("AirPrinter startup argument error: {error}");
             std::process::exit(2);
         }
     };
+    let background = startup.background;
+    let receive_only_dir = startup.receive_only_dir;
     println!("╔══════════════════════════════════════════════════════════╗");
     println!("║              🖨️  AirPrinter 启动中...                    ║");
     println!("╚══════════════════════════════════════════════════════════╝");
@@ -37,15 +43,17 @@ fn main() {
             }
             let preferences = config_dir.join("shared-printers.json");
             let settings_path = config_dir.join("settings.json");
-            let settings_store =
-                airprinter::services::SettingsStore::load(settings_path).map_err(std::io::Error::other)?;
-            let settings = settings_store.get();
-            let mut airprint_server = AirPrintServer::with_preferences(preferences)
+            let settings_store = airprinter::services::SettingsStore::load(settings_path)
                 .map_err(std::io::Error::other)?;
+            let settings = settings_store.get();
+            let mut airprint_server =
+                AirPrintServer::with_preferences(preferences).map_err(std::io::Error::other)?;
             if let Some(directory) = &receive_only_dir {
                 std::fs::create_dir_all(directory)?;
                 if !directory.is_dir() {
-                    return Err(std::io::Error::other("receive-only path is not a directory").into());
+                    return Err(
+                        std::io::Error::other("receive-only path is not a directory").into(),
+                    );
                 }
                 airprinter::services::diagnostics::record(&format!(
                     "[AirPrinter] receive-only mode: saving validated documents to {}",
@@ -75,6 +83,9 @@ fn main() {
             if let Err(error) = airprinter::tray::setup_tray(app.handle()) {
                 eprintln!("[AirPrinter] 系统托盘初始化失败: {error}");
             }
+            if !background {
+                airprinter::tray::show_main_window(app.handle()).map_err(std::io::Error::other)?;
+            }
 
             let handle = app.handle().clone();
             thread::spawn::<_, ()>(move || loop {
@@ -93,7 +104,9 @@ fn main() {
                     }
                     Err(error) => eprintln!("[AirPrinter] 检测 Windows 打印机失败: {error}"),
                 }
-                thread::sleep(Duration::from_secs(30));
+                thread::sleep(reconcile_interval(
+                    handle.get_webview_window("main").is_some(),
+                ));
             });
 
             println!(
@@ -136,29 +149,126 @@ fn main() {
                     .unwrap_or(false);
                 if close_to_tray {
                     api.prevent_close();
-                    let _ = window.hide();
+                    if let Err(error) = window.destroy() {
+                        eprintln!("[AirPrinter] 释放主窗口失败: {error}");
+                    }
                 }
             }
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(move |app, event| {
+            if let tauri::RunEvent::ExitRequested {
+                code: None, api, ..
+            } = event
+            {
+                let close_to_tray = app
+                    .state::<AppState>()
+                    .settings
+                    .lock()
+                    .map(|store| store.get().close_to_tray)
+                    .unwrap_or(false);
+                if should_prevent_exit(background, close_to_tray) {
+                    api.prevent_exit();
+                }
+            }
+        });
 }
 
-fn receive_only_directory() -> Result<Option<PathBuf>, String> {
-    let mut args = std::env::args_os().skip(1);
-    let mut directory = None;
+fn reconcile_interval(has_main_window: bool) -> Duration {
+    if has_main_window {
+        FOREGROUND_RECONCILE_INTERVAL
+    } else {
+        BACKGROUND_RECONCILE_INTERVAL
+    }
+}
+
+fn should_prevent_exit(background: bool, close_to_tray: bool) -> bool {
+    background || close_to_tray
+}
+
+#[derive(Debug, PartialEq)]
+struct StartupOptions {
+    background: bool,
+    receive_only_dir: Option<PathBuf>,
+}
+
+fn startup_options() -> Result<StartupOptions, String> {
+    parse_startup_options(std::env::args_os().skip(1))
+}
+
+fn parse_startup_options(
+    args: impl IntoIterator<Item = OsString>,
+) -> Result<StartupOptions, String> {
+    let mut args = args.into_iter();
+    let mut options = StartupOptions {
+        background: false,
+        receive_only_dir: None,
+    };
     while let Some(arg) = args.next() {
-        if arg == "--receive-only" {
-            if directory.is_some() {
+        if arg == "--background" {
+            options.background = true;
+        } else if arg == "--receive-only" {
+            if options.receive_only_dir.is_some() {
                 return Err("--receive-only may be specified only once".into());
             }
-            let value = args.next().ok_or("--receive-only requires an absolute directory path")?;
+            let value = args
+                .next()
+                .ok_or("--receive-only requires an absolute directory path")?;
             let path = PathBuf::from(value);
             if !path.is_absolute() {
                 return Err("--receive-only requires an absolute directory path".into());
             }
-            directory = Some(path);
+            options.receive_only_dir = Some(path);
         }
     }
-    Ok(directory)
+    Ok(options)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn startup_options_combine_background_and_receive_only() {
+        let directory = std::env::temp_dir().join("airprinter-receive-only");
+        let options = parse_startup_options([
+            OsString::from("--background"),
+            OsString::from("--receive-only"),
+            directory.clone().into_os_string(),
+        ])
+        .unwrap();
+
+        assert!(options.background);
+        assert_eq!(options.receive_only_dir, Some(directory));
+    }
+
+    #[test]
+    fn receive_only_still_rejects_duplicate_values() {
+        let directory = std::env::temp_dir();
+        let result = parse_startup_options([
+            OsString::from("--receive-only"),
+            directory.clone().into_os_string(),
+            OsString::from("--receive-only"),
+            directory.into_os_string(),
+        ]);
+
+        assert_eq!(
+            result.unwrap_err(),
+            "--receive-only may be specified only once"
+        );
+    }
+
+    #[test]
+    fn background_reconciliation_runs_less_often() {
+        assert_eq!(reconcile_interval(true), Duration::from_secs(30));
+        assert_eq!(reconcile_interval(false), Duration::from_secs(300));
+    }
+
+    #[test]
+    fn background_mode_stays_alive_without_a_window() {
+        assert!(should_prevent_exit(true, false));
+        assert!(should_prevent_exit(false, true));
+        assert!(!should_prevent_exit(false, false));
+    }
 }

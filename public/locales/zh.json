@@ -2,6 +2,12 @@
   "app": {
     "title": "🖨️ AirPrinter"
   },
+  "nav": {
+    "label": "主导航",
+    "printers": "打印机",
+    "logs": "运行日志",
+    "settings": "设置"
+  },
   "printers": {
     "title": "打印机列表",
     "no_printers": "未发现可共享的实体打印机。请先在 Windows 中安装打印机驱动并连接打印机，然后刷新。"
@@ -61,9 +67,9 @@
     "title": "设置",
     "language": "语言",
     "close_to_tray": "关闭窗口后在系统托盘继续运行",
-    "close_to_tray_hint": "关闭窗口不会退出程序，打印机保持共享；可从托盘图标退出。",
+    "close_to_tray_hint": "关闭会释放界面，打印机保持共享；可从托盘重新打开或退出。",
     "autostart": "开机自动启动",
-    "autostart_hint": "登录 Windows 时自动启动 AirPrinter。"
+    "autostart_hint": "登录 Windows 时以轻量后台模式启动 AirPrinter。"
   },
   "window": {
     "minimize": "最小化",

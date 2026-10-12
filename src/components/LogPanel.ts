@@ -48,8 +48,8 @@ export class LogPanel {
             <span class="panel-icon"><i class="fa-solid fa-terminal"></i></span>
             <h2 id="lp-title" class="panel-title"></h2>
           </div>
-          <button id="clear-log" class="btn-icon">
-            <i class="fa-solid fa-trash-can"></i>
+          <button id="clear-log" class="btn-icon" type="button">
+            <i class="fa-solid fa-trash-can" aria-hidden="true"></i>
           </button>
         </div>
         <div id="log-content" class="log-area">
@@ -65,6 +65,7 @@ export class LogPanel {
     }
     if (this.clearBtn) {
       this.clearBtn.setAttribute("title", i18n.t("logs.clear"));
+      this.clearBtn.setAttribute("aria-label", i18n.t("logs.clear"));
     }
   }
 

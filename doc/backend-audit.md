@@ -163,3 +163,10 @@
 - 当前 `mdns-sd 0.11.5` 每个服务实例只能持有一个 subtype；对相同 fullname 再注册会替换已有记录。因此 `_universal` 之外的 `_print` 子类型及 §4.2.3 LOC/手动位置配置仍未完成，不能以属性表测试宣称完整规范符合性。
 - 直接广播分支本轮验证：Rust 库测试 **38 passed / 0 failed / 4 ignored**；`cargo check --all-targets --locked` 与 `pnpm build` 通过。测试中的回环监听使用正常主机权限；没有从真实 Apple 系统打印面板完成文件提交或实体出纸，本轮不发布正式版本。
 - 共同修复移植到 `virtual-gateway-printer` 后，Rust 库测试 **40 passed / 0 failed / 4 ignored**；`cargo check --all-targets --locked` 与 `pnpm build` 通过。固定虚拟入口的目标切换和旧作业绑定测试仍通过；尚未取得真实 Apple 原生提交及实体出纸证据。
+
+## 直接广播实机成功与 1.0.0 快照（2026-10-12）
+
+- 用户确认 `direct-printer-broadcast` 已从 Apple 系统打印流程成功输出到实体打印机。该成功路径快进合并到 `main`，并以注释标签 `v1.0.0` 固定；后续后台生命周期和界面改造从该标签之后继续。
+- 开机启动注册命令改为 `"AirPrinter.exe" --background`。后台启动不创建 WebView；普通窗口关闭到托盘时销毁 WebView，点击托盘再按配置创建。实测后台无 AirPrinter 窗口，调试构建工作集约 22 MB、私有内存约 4 MB。
+- Windows 队列能力检测在前台保持 30 秒周期，后台无窗口时降为 5 分钟；应用启动后仍立即执行一次同步，保证已保存的共享恢复。
+- 界面改为 820×506（约 1.62:1）、最小 720×445 的无边框横向窗口，左侧导航切换打印机、日志和设置。真实 Tauri 窗口、三页导航、打印机状态和共享开关完成目视验收。

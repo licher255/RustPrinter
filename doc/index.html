@@ -144,8 +144,8 @@
         </header>
         <div class="status-grid" aria-label="当前项目状态">
           <div class="status-card"><strong>协议链路已实现</strong><span>DNS-SD 发现 · IPP 接收 · Windows 队列投递</span></div>
-          <div class="status-card"><strong>继续规范审计</strong><span>每队列独立路由 · 真实设备仍待验收</span></div>
-          <div class="status-card"><strong>实机验收待完成</strong><span>Apple 系统发现与实体出纸尚未验证</span></div>
+          <div class="status-card"><strong>1.0.0 实机通过</strong><span>Apple 系统打印 · 实体队列出纸</span></div>
+          <div class="status-card"><strong>轻量后台</strong><span>无窗口不加载 WebView · 托盘按需重建</span></div>
         </div>
 
         <section class="content" id="overview" aria-labelledby="overview-heading">
@@ -153,7 +153,7 @@
           <p class="intro">此文档对应 <code>direct-printer-broadcast</code> 分支。AirPrinter 是面向 Windows 10/11 的 Tauri 桌面程序，可分别发布已安装驱动的 Windows 队列。Apple 客户端通过 mDNS 找到共享队列后，使用 IPP/HTTP 发送作业，由对应的 Windows 驱动处理。</p>
           <div class="card-grid">
             <div class="card"><span class="number">01</span><h3>每队列独立发布</h3><p>PC 上可分别开启多个 Windows 打印队列；每台队列有独立的 <code>/ipp/print/&lt;id&gt;</code> 资源路径和发现身份。</p></div>
-            <div class="card"><span class="number">02</span><h3>切换目标只影响新作业</h3><p>切换后新接收的作业绑定到新队列；已经接收的作业继续使用原目标。程序每 30 秒检查 Windows 队列状态。</p></div>
+            <div class="card"><span class="number">02</span><h3>轻量后台运行</h3><p>关闭界面后释放 WebView，打印共享继续运行；前台每 30 秒、后台每 5 分钟检查 Windows 队列状态。</p></div>
           </div>
         </section>
 
@@ -165,7 +165,7 @@
             <div class="card"><span class="number">3</span><h3>连接同一局域网</h3><p>PC 可通过网线接路由器，iPhone、iPad、Mac 可用 Wi-Fi。两侧必须能互通；访客网络与 AP 隔离会阻止发现。</p></div>
             <div class="card"><span class="number">4</span><h3>从系统打印界面选择队列</h3><p>在 Apple 设备支持打印的应用中打开系统打印界面，选择已共享的队列。停止其中一台队列不影响另一台。</p></div>
           </div>
-          <div class="callout warning"><strong>当前验证范围</strong><p>本机 IPP 到 Microsoft Print to PDF 的测试已有记录；真实手机原生提交和实体打印机出纸仍未验证。规范差距见 <a href="conformance-plan.md">符合性计划</a>。</p></div>
+          <div class="callout warning"><strong>当前验证范围</strong><p>用户已确认直接广播方案完成一次 Apple 系统打印与实体出纸；更多系统版本、文档格式和打印选项仍需扩展验收。规范差距见 <a href="conformance-plan.md">符合性计划</a>。</p></div>
         </section>
 
         <section class="content" id="architecture" aria-labelledby="architecture-heading">
@@ -190,7 +190,7 @@
             <tr><td>打印选项</td><td>作业名、彩色、双面、份数、纸型、质量、方向、页码、缩放</td><td>页码按收到的文档编号；缩放支持适合页面、填满、原始尺寸和自动模式。其余选项按 Windows 驱动能力公布；不支持的值会被拒绝。</td></tr>
           </tbody></table></div>
           <p class="muted" style="margin-top: 15px">首选 IPP 端口 631；若被占用，使用 8631–8699 中的空闲端口，并通过 DNS-SD 公布实际值。<code>ipp://</code> URI 可省略默认的 631，HTTP <code>Host</code> 仍需指向连接端口。</p>
-          <div class="callout warning"><strong>兼容性声明</strong><p>该项目尚未通过完整 IPP Everywhere 1.1 一致性或 Apple 实机验收。当前未发布 <code>_print._sub._ipp._tcp</code>，也未声称支持全部规范扩展。URF 是为了客户端互操作提供的文档格式；发现与传输仍走 DNS-SD 和 IPP。</p></div>
+          <div class="callout warning"><strong>兼容性声明</strong><p>直接广播方案已完成一次 Apple 实机打印，但项目尚未通过完整 IPP Everywhere 1.1 一致性。当前未发布 <code>_print._sub._ipp._tcp</code>，也未声称支持全部规范扩展。URF 是为了客户端互操作提供的文档格式；发现与传输仍走 DNS-SD 和 IPP。</p></div>
         </section>
 
         <section class="content" id="network" aria-labelledby="network-heading">
@@ -218,7 +218,7 @@ pnpm tauri build</code></pre>
           <span class="section-kicker">07 / Verify</span><h2 id="testing-heading">验证与当前边界</h2>
           <div class="card-grid">
             <div class="card"><h3>已本地验证</h3><p>既有 Rust 测试涵盖独立队列、路由与虚拟队列输出；当前改动的测试结果以本轮审计记录为准。</p></div>
-            <div class="card"><h3>尚未实机验证</h3><p>真实手机原生打印作业提交和实体打印机出纸仍未验证。虚拟队列测试不等于真实 iPhone/iPad/Mac 与实体打印机验收。</p></div>
+            <div class="card"><h3>实机范围</h3><p>直接广播已完成一次真实 Apple 系统提交与实体出纸；多系统版本、格式、双面、份数、纸型和异常状态仍需继续验证。</p></div>
           </div>
           <div class="callout"><strong>仅接收诊断模式</strong><p>可使用 <code>airprinter.exe --receive-only "绝对路径"</code> 将收到的文档保存为待处理作业，不调用打印驱动。该模式只用于接收链路诊断。普通模式会自动处理和投递作业，无需用户下载文档或手动打印。</p></div>
           <p class="code-label">协议和本地打印模拟</p>

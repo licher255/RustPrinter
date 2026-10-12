@@ -28,11 +28,58 @@ const updatePageTranslations = () => {
       }
     }
   });
+  document.querySelectorAll<HTMLElement>("[data-i18n-aria-label]").forEach((el) => {
+    const key = el.getAttribute("data-i18n-aria-label");
+    if (key) {
+      const translation = i18n.t(key);
+      if (translation && translation !== key) {
+        el.setAttribute("aria-label", translation);
+      }
+    }
+  });
 
   const appTitle = i18n.t("app.title");
   if (appTitle && appTitle !== "app.title") {
     document.title = appTitle.replace(/🖨️\s*/, "");
   }
+};
+
+const setupNavigation = () => {
+  const tabs = Array.from(document.querySelectorAll<HTMLButtonElement>(".nav-item"));
+
+  const selectTab = (tab: HTMLButtonElement, focusPanel = false) => {
+    const view = tab.dataset.view;
+    if (!view) return;
+
+    tabs.forEach((item) => {
+      const selected = item === tab;
+      item.classList.toggle("active", selected);
+      item.setAttribute("aria-selected", String(selected));
+      item.tabIndex = selected ? 0 : -1;
+    });
+
+    document.querySelectorAll<HTMLElement>(".app-view").forEach((panel) => {
+      panel.hidden = panel.id !== `view-${view}`;
+    });
+
+    if (focusPanel) document.getElementById(`view-${view}`)?.focus();
+  };
+
+  tabs.forEach((tab, index) => {
+    tab.addEventListener("click", () => selectTab(tab));
+    tab.addEventListener("keydown", (event) => {
+      let nextIndex = index;
+      if (event.key === "ArrowDown" || event.key === "ArrowRight") nextIndex = (index + 1) % tabs.length;
+      else if (event.key === "ArrowUp" || event.key === "ArrowLeft") nextIndex = (index - 1 + tabs.length) % tabs.length;
+      else if (event.key === "Home") nextIndex = 0;
+      else if (event.key === "End") nextIndex = tabs.length - 1;
+      else return;
+
+      event.preventDefault();
+      selectTab(tabs[nextIndex]);
+      tabs[nextIndex].focus();
+    });
+  });
 };
 
 document.addEventListener("DOMContentLoaded", async () => {
@@ -43,6 +90,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
 
   setupTitlebar();
+  setupNavigation();
   new PrinterList("printer-list-container");
   new Settings("settings-container");
   new LogPanel("log-panel-container");

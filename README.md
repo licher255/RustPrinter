@@ -2,7 +2,7 @@
 
 [查看 HTML 项目文档](doc/index.html)
 
-本分支 `direct-printer-broadcast` 将 PC 上已安装驱动的 USB、有线网络或已配对 Windows 队列分别发布到局域网。每个共享队列有独立的发现身份和 IPP 资源路径，收到的作业直接投递到对应的 Windows 队列。固定虚拟入口的方案在 `virtual-gateway-printer` 分支。
+`main` 使用已通过实机打印的直接广播方案：将 PC 上已安装驱动的 USB、有线网络或已配对 Windows 队列分别发布到局域网。每个共享队列有独立的发现身份和 IPP 资源路径，收到的作业直接投递到对应的 Windows 队列。实机成功快照记录为 `v1.0.0`；固定虚拟入口方案保留在 `virtual-gateway-printer` 分支。
 
 ## 使用
 
@@ -10,6 +10,8 @@
 2. 启动 AirPrinter，在列表中分别开启需要共享的 Windows 打印队列。
 3. 让 iPhone/iPad/Mac 与 PC 位于可以互通的局域网，在系统打印面板中选择对应队列。
 4. 可单独停止某台队列的共享；另一台仍保持服务。已接收作业继续绑定其原队列。
+
+窗口默认关闭到系统托盘并释放 WebView，打印服务继续运行；点击托盘图标可重新创建界面。开启“开机自动启动”后，AirPrinter 使用 `--background` 登录启动，不加载前端窗口。前台每 30 秒刷新 Windows 队列，纯后台模式降为每 5 分钟，减少 PowerShell 查询和前端内存占用。
 
 日常打印在手机系统打印面板选择已共享的队列、设置打印选项并点击打印。PC 自动接收、处理和投递到该 Windows 队列；无需下载素材、打开查看器或再次确认打印。浏览器测试页仅用于诊断连接，不是日常打印步骤。
 
@@ -30,7 +32,7 @@ Windows 队列与驱动能力
 - 使用 Rust `mdns-sd` 为每个共享队列广播 `_ipp._tcp`、`_universal._sub._ipp._tcp` 和端口为 0 的 `_printer._tcp` 标识服务。当前规范子类型与 LOC 偏差见[符合性计划](doc/conformance-plan.md)。
 - 每台队列有独立的 `/ipp/print/<id>` URI；只有恰好共享一台时才接受 `/ipp/print` 兼容别名。
 - 遵循 IPP 的默认端口语义：`ipp://` URI 可以省略 631，HTTP `Host` 仍按实际监听端口验证；Bonjour `.local` 名称和本机 IP 都可作为合法目标。
-- 每 30 秒同步 Windows 队列状态与驱动能力。单个 Windows 输出目标的选择保存在用户配置目录，不复制待打印文档。
+- 窗口打开时每 30 秒同步 Windows 队列状态与驱动能力，后台无窗口时每 5 分钟同步。共享选择保存在用户配置目录，不复制待打印文档。
 - PDF 使用 Windows 自带 `Windows.Data.Pdf`；JPEG 使用 Windows 图像解码；URF/PWG Raster 支持所公布的 sGray8 / sRGB24，经 GDI 静默投递。
 - 支持 Print-Job、Validate-Job、Create-Job、Send-Document（单文档）、Get-Job-Attributes、Get-Jobs、Cancel-Job。
 - 公布驱动实际支持的彩色、双面、份数和纸张尺寸；A4、A5、Letter、Legal 使用标准名称，其余驱动纸型按尺寸生成自定义介质名称。
@@ -44,7 +46,7 @@ Windows 队列与驱动能力
 
 发现使用 DNS-SD/mDNS，作业传输使用 IPP/HTTP。URF 是为了 Apple 客户端互操作实现的文档格式，不是替代 IPP 的私有传输协议；同时实现了 `doc/cs-ippeve11-20200515-5100.14.pdf` 中的 PWG Raster 格式路径。
 
-本项目目前**不宣称已通过完整 IPP Everywhere 1.1 认证，也不保证所有 Apple 系统版本**。为保留已观察到的 Apple 发现路径，当前仍公布 `ipp-features-supported=ipp-everywhere`，但 `_print._sub._ipp._tcp`、LOC 和 PDF overrides 等 MUST 条款尚未完成；此标记不能作为完整符合性证明。Apple 系统打印面板与真实硬件仍需实机互操作验收。
+本项目目前**不宣称已通过完整 IPP Everywhere 1.1 认证，也不保证所有 Apple 系统版本**。为保留已观察到的 Apple 发现路径，当前仍公布 `ipp-features-supported=ipp-everywhere`，但 `_print._sub._ipp._tcp`、LOC 和 PDF overrides 等 MUST 条款尚未完成；此标记不能作为完整符合性证明。`direct-printer-broadcast` 已由用户确认完成一次 Apple 系统打印到实体打印机，更多系统版本、格式和打印选项仍需扩展验收。
 
 - [IPP Everywhere / PWG](https://www.pwg.org/ipp/everywhere.html)
 - [Apple 关于 AirPrint DNS-SD 子类型与 URF 的说明](https://support.apple.com/guide/deployment/dep3b4cf515/web)

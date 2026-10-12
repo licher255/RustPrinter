@@ -1,7 +1,7 @@
 use rust_i18n::t;
 use tauri::menu::{Menu, MenuItemBuilder};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Manager, Runtime};
+use tauri::{AppHandle, Manager, Runtime, WebviewWindowBuilder};
 
 pub const TRAY_ID: &str = "main";
 
@@ -11,12 +11,27 @@ pub fn build_tray_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>>
     Menu::with_items(app, &[&show, &quit])
 }
 
-fn show_main_window(app: &AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.show();
-        let _ = window.unminimize();
-        let _ = window.set_focus();
-    }
+pub fn show_main_window(app: &AppHandle) -> Result<(), String> {
+    let window = match app.get_webview_window("main") {
+        Some(window) => window,
+        None => {
+            let config = app
+                .config()
+                .app
+                .windows
+                .iter()
+                .find(|config| config.label == "main")
+                .ok_or("main window configuration is missing")?;
+            WebviewWindowBuilder::from_config(app, config)
+                .map_err(|error| error.to_string())?
+                .build()
+                .map_err(|error| error.to_string())?
+        }
+    };
+    window.show().map_err(|error| error.to_string())?;
+    window.unminimize().map_err(|error| error.to_string())?;
+    window.set_focus().map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 pub fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
@@ -26,7 +41,11 @@ pub fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id().as_ref() {
-            "show" => show_main_window(app),
+            "show" => {
+                if let Err(error) = show_main_window(app) {
+                    eprintln!("[AirPrinter] 无法打开主窗口: {error}");
+                }
+            }
             "quit" => app.exit(0),
             _ => {}
         })
@@ -37,7 +56,9 @@ pub fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
                 ..
             } = event
             {
-                show_main_window(tray.app_handle());
+                if let Err(error) = show_main_window(tray.app_handle()) {
+                    eprintln!("[AirPrinter] 无法打开主窗口: {error}");
+                }
             }
         });
     if let Some(icon) = app.default_window_icon() {
