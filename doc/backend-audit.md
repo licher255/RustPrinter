@@ -162,3 +162,4 @@
 - 复查 §9.3：此前 `overrides-supported` 声称支持页级覆盖，但作业流程没有执行它。现已撤销该虚假声明并拒绝客户端 `overrides`；非空 `document-password` 同样明确拒绝，不再静默忽略。**PDF 条件必需的 overrides 仍未实现，故不符合完整 IPP Everywhere 1.1。**
 - 当前 `mdns-sd 0.11.5` 每个服务实例只能持有一个 subtype；对相同 fullname 再注册会替换已有记录。因此 `_universal` 之外的 `_print` 子类型及 §4.2.3 LOC/手动位置配置仍未完成，不能以属性表测试宣称完整规范符合性。
 - 直接广播分支本轮验证：Rust 库测试 **38 passed / 0 failed / 4 ignored**；`cargo check --all-targets --locked` 与 `pnpm build` 通过。测试中的回环监听使用正常主机权限；没有从真实 Apple 系统打印面板完成文件提交或实体出纸，本轮不发布正式版本。
+- 共同修复移植到 `virtual-gateway-printer` 后，Rust 库测试 **40 passed / 0 failed / 4 ignored**；`cargo check --all-targets --locked` 与 `pnpm build` 通过。固定虚拟入口的目标切换和旧作业绑定测试仍通过；尚未取得真实 Apple 原生提交及实体出纸证据。

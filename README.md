@@ -44,7 +44,7 @@ Windows 队列与驱动能力
 
 发现使用 DNS-SD/mDNS，作业传输使用 IPP/HTTP。URF 是为了 Apple 客户端互操作实现的文档格式，不是替代 IPP 的私有传输协议；同时实现了 `doc/cs-ippeve11-20200515-5100.14.pdf` 中的 PWG Raster 格式路径。
 
-本项目目前**不宣称已通过完整 IPP Everywhere 1.1 认证，也不保证所有 Apple 系统版本**。`_print._sub._ipp._tcp` 和 `ipp-features-supported=ipp-everywhere` 不应仅为让设备出现而虚假声明；现实现还有完整规范的扩展操作、属性和认证测试待补。Apple 系统打印面板与真实硬件仍需实机互操作验收。
+本项目目前**不宣称已通过完整 IPP Everywhere 1.1 认证，也不保证所有 Apple 系统版本**。为保留已观察到的 Apple 发现路径，当前仍公布 `ipp-features-supported=ipp-everywhere`，但 `_print._sub._ipp._tcp`、LOC 和 PDF overrides 等 MUST 条款尚未完成；此标记不能作为完整符合性证明。Apple 系统打印面板与真实硬件仍需实机互操作验收。
 
 - [IPP Everywhere / PWG](https://www.pwg.org/ipp/everywhere.html)
 - [Apple 关于 AirPrint DNS-SD 子类型与 URF 的说明](https://support.apple.com/guide/deployment/dep3b4cf515/web)
