@@ -2,7 +2,27 @@
 
 [View the HTML project documentation](doc/index.html)
 
+[Read the engineering case study: *The Simple Printer Feature That Took Nearly 800 Million Tokens*](doc/blog/spec-first-airprint-case-study.md)
+
 The current stable release is **2.0.0.stable**. The installer uses the SemVer-compatible version `2.0.0`. The `main` branch uses the direct-broadcast design, which has been tested with a physical printer: each installed Windows printer queue (USB, wired network, or paired Windows queue) is advertised to the local network. Each shared queue has its own discovery identity and IPP resource path, and received jobs are sent directly to the matching Windows queue. The first successful physical-print snapshot is preserved as `v1.0.0`; the fixed virtual-entry design is retained on the `virtual-gateway-printer` branch.
+
+## Why this project exists
+
+Many homes still have reliable USB printers whose Windows drivers work perfectly, but the printers cannot join the network and therefore never appear in the iPhone, iPad, or Mac system print dialog. Replacing a working printer only to gain AirPrint support is wasteful.
+
+AirPrinter turns the Windows PC already connected to that printer into a lightweight local print bridge. The PC publishes the printer through DNS-SD/mDNS, the home router or switch carries that multicast traffic across the LAN, and Apple devices submit standard IPP jobs back to the PC. No router firmware change, cloud service, Apple driver, or Windows virtual printer driver is required.
+
+## Features
+
+- Discovers usable physical Windows printer queues and filters interactive PDF, XPS, OneNote, and Fax destinations.
+- Publishes each selected queue independently for AirPrint discovery on the local network.
+- Accepts IPP over HTTP and IPPS, including Apple clients that initiate TLS on the advertised print port.
+- Supports PDF, JPEG, URF, and PWG Raster input.
+- Preserves job name, copies, duplex, color, media, quality, orientation, page ranges, and scaling when supported by the Windows driver.
+- Tracks, queries, and cancels jobs through the Windows spooler.
+- Restores remembered shares after restart or printer reconnection.
+- Runs at Windows sign-in without loading the WebView and recreates the interface from the system tray on demand.
+- Provides diagnostics, receive-only validation, packet-capture helpers, and a least-scope Windows firewall setup command.
 
 ## Use AirPrinter
 
@@ -128,6 +148,8 @@ These tests show that the local implementation can run; they do not replace acce
 ## Support and donations
 
 For support, please open an issue in this repository. To donate via PayPal, send a payment to **licher255@outlook.com**.
+
+![Buy me a coffee via PayPal](doc/assets/buy-me-a-coffee.png)
 
 ## License
 
