@@ -155,4 +155,4 @@ For support, please open an issue in this repository. To donate via PayPal, send
 
 ## License
 
-AirPrinter is licensed under the [MIT License](LICENSE).
+AirPrinter is licensed under the [Apache License, Version 2.0](LICENSE).
