@@ -1,0 +1,58 @@
+name: Release Windows installers
+
+on:
+  push:
+    tags:
+      - "v*.*.*.stable"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish Windows x64 installers
+    runs-on: windows-2022
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.28.1
+          run_install: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Rust stable for Windows x64
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Verify release tag matches the application version
+        shell: pwsh
+        run: |
+          $version = node -p "require('./package.json').version"
+          $expectedTag = "v$version.stable"
+          if ("${{ github.ref_name }}" -ne $expectedTag) {
+            throw "Tag ${{ github.ref_name }} does not match $expectedTag"
+          }
+
+      - name: Build installers and publish GitHub Release
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: AirPrinter ${{ github.ref_name }}
+          releaseBody: Windows 11-compatible x64 MSI and NSIS installers. These builds are not code-signed, so Windows may show an unknown-publisher warning.
+          releaseDraft: false
+          prerelease: false
+          args: --target x86_64-pc-windows-msvc --bundles msi nsis --ci

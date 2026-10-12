@@ -1,36 +1,36 @@
-# 两种发布方式的规范审计与验收计划
+# Conformance Audit and Acceptance Plan for the Two Publishing Models
 
-基准：`cs-ippeve11-20200515-5100.14.md`（PWG 5100.14-2020）。本文记录实现证据与待办，不将“属性存在”或“本机测试通过”等同于 IPP Everywhere 认证或 Apple 实机打印成功。
+Baseline: `cs-ippeve11-20200515-5100.14.md` (PWG 5100.14-2020). This document records implementation evidence and outstanding work. The presence of an attribute or a passing local test does not constitute IPP Everywhere certification or successful printing from a real Apple device.
 
-## 两个分支的边界
+## Boundaries of the Two Branches
 
-| 分支 | 对外身份 | 作业路由 | 必须单独验证 |
+| Branch | Published identity | Job routing | Must be verified separately |
 | --- | --- | --- | --- |
-| `direct-printer-broadcast` | 每个 Windows 队列各有 DNS-SD 实例、UUID 和 `/ipp/print/<id>` | 按 URI 对应的实体队列投递；多队列并存 | 两队列同时广播、并发提交、撤销其中一台后另一台保持可用，默认 `/ipp/print` 别名仅在单队列时有效 |
-| `virtual-gateway-printer` | 固定 AirPrinter 身份、UUID 和 `/ipp/print` | Create-Job / Print-Job 时锁定当前实体目标；切换后旧作业继续走原目标 | 切换时身份不变、旧作业不串队列、离线撤回、旧实体 URI 只匹配当前目标 |
+| `direct-printer-broadcast` | Each Windows queue has its own DNS-SD instance, UUID, and `/ipp/print/<id>` | Submit to the physical queue associated with the URI; multiple queues coexist | Both queues broadcast simultaneously; concurrent submissions; the remaining queue stays available after one is withdrawn; the default `/ipp/print` alias works only when there is one queue |
+| `virtual-gateway-printer` | Fixed AirPrinter identity, UUID, and `/ipp/print` | Lock the current physical target at Create-Job / Print-Job time; existing jobs continue to use their original target after a switch | Identity remains unchanged during switching; jobs do not cross queues; withdrawal while offline; old physical queue URIs match only the current target |
 
-`ipp/server.rs` 和 `mdns_broadcaster.rs` 在两分支的现有提交中相同。共同规范修复已分别进入两分支并各跑回归，不能只凭同源代码推断行为一致。
+The existing commits for `ipp/server.rs` and `mdns_broadcaster.rs` are identical on both branches. The shared conformance fixes were applied to both branches separately and regression-tested on each; behavior must not be assumed identical solely because the source is shared.
 
-## MUST / SHOULD 审计项
+## MUST / SHOULD Audit Items
 
-| 规范条款 | 当前证据与问题 | 验收条件 |
+| Specification clause | Current evidence and issue | Acceptance criteria |
 | --- | --- | --- |
-| 4.2.1–4.2.2 DNS-SD | 已移除实例名默认哈希，并在本进程中拒绝同名覆盖；仍缺 `_print._sub._ipp._tcp` 和 IPPS 对应子类型，同名碰撞后自动改名未实现 | 同一基础实例同时可由 Apple 与规范子类型发现；PTR 指向同一 SRV/TXT，停止共享后两种子类型均撤回；只有冲突时追加区分后缀 |
-| 4.2.3 LOC | `mdns-sd` 当前接口未发布 LOC，也没有用户配置位置 | 提供位置配置并在每个相关实例发布可解析 LOC；未知精度按规范编码；不能实现前保留为明确偏差 |
-| 4.2.4 TXT | `rp`、`pdl`、`TLS`、TXT 长度已有测试 | 抓取实际 mDNS 数据包，确认 `rp` 在前 400 字节、总长限制、IPP/IPPS 端口与 `printer-uri-supported` 一致 |
-| 5.1.1–5.1.3 HTTP | 已统一校验唯一 Host；图标条件 GET 和 304、IPP POST `no-cache` 的本机回归通过 | 实机流量复核 Host、Last-Modified 和条件响应；新增公开资源继续走统一校验 |
-| 5.2、表 4 操作 | 11 个操作码已声明并有部分协议测试；`Identify-Printer` 只记录日志，需核实其响应语义 | 每个声明操作均有正反例、真实 IPP 序列化回放，并与作业状态和 Windows 取消行为一致 |
-| 5.3–5.8、表 5/7/8/10/11/12 | 现有测试检查属性出现，未逐项核对值、条件适用性及真正执行 | 建立表格逐项测试：值类型、单位、默认、支持范围、条件、不支持选项的错误；声明内容与驱动及后台实际行为一致 |
-| 9.3 PDF 条件要求 | 非空 `document-password` 和任意 `overrides` 现明确拒绝；已撤销虚假的 `overrides-supported`。PDF 条件必需的 overrides 功能仍缺 | 实现页级覆盖的实际 Windows 输出及协议正反例，补回与实现一致的能力声明 |
-| 5.3/5.4 设备事实 | 未测得的速度和边距使用 `unknown` (0x12)；IPP 型号与 DNS-SD `ty`/`product` 均为真实软件桥接器身份 | 从实际驱动获取能力时再精化；值及单位必须与打印执行保持一致 |
-| 7.1 逻辑设备标志 | 两种方案均已同时报告 `ipp-everywhere` 和 `ipp-everywhere-server` | 保持逻辑设备标志一致；其余硬性项未满足前不宣称完整一致性 |
-| 8、10、11 字符串/URI/安全 | Unicode 控制字符过滤、URI 来源和全部 HTTP Host 路径尚未形成覆盖 | 用含控制字符及多语言队列名、恶意 Host、IPv4/Bonjour/备用端口测试回放；不产生非法或不可达 URI |
+| 4.2.1–4.2.2 DNS-SD | The default instance-name hash has been removed, and this process rejects name collisions; `_print._sub._ipp._tcp` and the corresponding IPPS subtype are still missing, and automatic renaming after a name collision is not implemented | The same base instance is discoverable through both Apple and specification subtypes; PTR records point to the same SRV/TXT; both subtypes are withdrawn when sharing stops; append a distinguishing suffix only when a collision occurs |
+| 4.2.3 LOC | The current `mdns-sd` interface does not publish LOC, and no user-configurable location is available | Provide location configuration and publish a parseable LOC for each relevant instance; encode unknown precision as specified; retain this as an explicit deviation until implementation is possible |
+| 4.2.4 TXT | `rp`, `pdl`, `TLS`, and TXT length have tests | Capture actual mDNS packets and confirm that `rp` appears within the first 400 bytes, total length limits are met, and IPP/IPPS ports agree with `printer-uri-supported` |
+| 5.1.1–5.1.3 HTTP | A unique Host is validated consistently; local regressions for conditional GET and 304 on icons, and `no-cache` on IPP POST, pass | Review Host, Last-Modified, and conditional responses in real-device traffic; route any newly exposed resources through the same validation |
+| 5.2, Table 4 operations | Eleven operation codes are declared and some have protocol tests; `Identify-Printer` only logs the request, so its response semantics need verification | Each declared operation has positive and negative cases and replay tests using actual IPP serialization, consistent with job state and Windows cancellation behavior |
+| 5.3–5.8, Tables 5/7/8/10/11/12 | Existing tests check that attributes are present, but do not verify each value, its applicability conditions, or actual execution | Create a table-driven test for each item: value type, units, default, supported range, conditions, and errors for unsupported options; declarations must match driver capabilities and actual backend behavior |
+| 9.3 PDF conditional requirements | Non-empty `document-password` and any `overrides` are now explicitly rejected; the false `overrides-supported` claim has been withdrawn. PDF conditional `overrides` functionality is still missing | Implement actual Windows output with page-level overrides and positive/negative protocol tests; restore capability declarations that match the implementation |
+| 5.3/5.4 device facts | Speed and margins that have not been measured use `unknown` (0x12); the IPP model and DNS-SD `ty`/`product` both identify the actual software bridge | Refine values when they can be obtained from the actual driver; values and units must match print execution |
+| 7.1 logical-device flags | Both models report `ipp-everywhere` and `ipp-everywhere-server` | Keep logical-device flags consistent; do not claim full conformance until all other mandatory items are satisfied |
+| 8, 10, 11 strings/URIs/security | Coverage is not yet established for Unicode control-character filtering, URI sources, and all HTTP Host paths | Replay tests with control characters and multilingual queue names, malicious Host values, IPv4/Bonjour/alternate ports; do not produce invalid or unreachable URIs |
 
-## 实施顺序与发布门槛
+## Implementation Order and Release Gates
 
-1. **共同协议层**：修复 Host/条件 GET，审查业务属性的真实语义，再处理 DNS-SD 双子类型和位置记录。每项变更附条款、代码位置与失败前/通过后的测试。
-2. **两种路由分别验收**：先直接广播两队列，再固定虚拟入口切换目标。回归应覆盖 Print-Job、Validate-Job、Create/Send/Close、查询、取消、停止共享和恢复。
-3. **本机集成**：`cargo test --locked`、`cargo check --all-targets --locked`、`pnpm build`；网络抓包核对 PTR/SRV/TXT/LOC、HTTP 头及 IPP 编码；只用测试虚拟队列进行自动输出。
-4. **真实设备验收**：从另一台 Apple 设备发现、提交 PDF/JPEG、多页及打印选项，观察收到文件、Windows spooler 和实体出纸三个独立阶段。未取得这些证据前，只发布开发构建和已验证范围，不标为 AirPrint/IPP Everywhere 完整通过。
+1. **Shared protocol layer**: Fix Host and conditional GET handling, review the real semantics of operational attributes, then address DNS-SD dual subtypes and location records. Each change must include its clause, code location, and tests before and after the fix.
+2. **Accept each routing model separately**: First test two queues with direct broadcasting, then target switching through the fixed virtual entry point. Regression coverage should include Print-Job, Validate-Job, Create/Send/Close, queries, cancellation, stopping sharing, and recovery.
+3. **Local integration**: Run `cargo test --locked`, `cargo check --all-targets --locked`, and `pnpm build`; inspect packet captures for PTR/SRV/TXT/LOC, HTTP headers, and IPP encoding; use only a test virtual queue for automatic output.
+4. **Real-device acceptance**: Discover and submit PDF/JPEG, multipage documents, and print options from another Apple device; observe file receipt, the Windows spooler, and physical output as three separate stages. Until this evidence is available, publish only development builds and verified scope; do not label the result as full AirPrint/IPP Everywhere conformance.
 
-两分支的 README、项目文档和测试记录已分别更新；直接广播分支描述逐队列发布，虚拟入口分支描述固定入口。仍需以真实 Apple 设备和实体打印机完成最终验收。
+The README, project documentation, and test records have been updated separately on both branches; the direct-broadcast branch describes per-queue publishing, and the virtual-entry branch describes a fixed entry point. Final acceptance with a real Apple device and physical printer is still required.

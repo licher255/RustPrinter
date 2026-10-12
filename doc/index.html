@@ -1,14 +1,14 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="en">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="color-scheme" content="light">
-    <meta name="description" content="AirPrinter 直接广播分支：分别发布 Windows 打印队列，并将 IPP 作业投递到对应队列。">
-    <title>AirPrinter · 项目文档</title>
+    <meta name="description" content="AirPrinter shares Windows printer queues on your local network and routes IPP jobs to the selected queue.">
+    <title>AirPrinter · Project Documentation</title>
     <style>
       :root {
-        font-family: "Segoe UI", "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
+        font-family: "Segoe UI", system-ui, sans-serif;
         color: #182831;
         background: #f5f7f5;
         line-height: 1.65;
@@ -115,22 +115,23 @@
     </style>
   </head>
   <body>
-    <a class="skip-link" href="#main">跳转到正文</a>
+    <a class="skip-link" href="#main">Skip to main content</a>
     <div class="layout">
-      <aside aria-label="文档导航">
+      <aside aria-label="Documentation navigation">
         <a class="brand" href="#top"><span class="brand-mark" aria-hidden="true">▤</span><span>AirPrinter<small>Project documentation</small></span></a>
-        <p class="nav-caption">项目文档 · V0.1.0</p>
-        <nav aria-label="章节">
-          <a href="#overview">项目概览</a>
-          <a href="#quickstart">快速开始</a>
-          <a href="#architecture">工作原理</a>
-          <a href="#protocol">协议与格式</a>
-          <a href="#network">网络与安全</a>
-          <a href="#development">开发与构建</a>
-          <a href="#testing">验证与边界</a>
-          <a href="#files">源码入口</a>
+        <p class="nav-caption">Project documentation · 2.0.0.stable</p>
+        <nav aria-label="Sections">
+          <a href="#overview">Overview</a>
+          <a href="#quickstart">Getting started</a>
+          <a href="#architecture">How it works</a>
+          <a href="#protocol">Protocols and formats</a>
+          <a href="#network">Network and security</a>
+          <a href="#development">Development and builds</a>
+          <a href="#testing">Validation and limitations</a>
+          <a href="#files">Source map</a>
+          <a href="#license">License and support</a>
         </nav>
-        <div class="aside-end">基于当前代码与审核记录<br>更新于 2026-09-23</div>
+        <div class="aside-end">Based on the current code and review records<br>Updated 2026-10-12</div>
       </aside>
 
       <main id="main">
@@ -138,117 +139,125 @@
           <div>
             <p class="eyebrow">Windows → Local network → Apple devices</p>
             <h1>AirPrinter</h1>
-            <p class="lead">在局域网分别发布 Windows 打印队列，使用 DNS-SD 与 IPP 接收作业，并转交到对应队列。</p>
+            <p class="lead">Share Windows printer queues on your local network. AirPrinter discovers them with DNS-SD, receives jobs over IPP, and routes each job to its selected queue.</p>
           </div>
           <div class="hero-illustration" aria-hidden="true"><div class="paper"></div><div class="printer-shape"></div></div>
         </header>
-        <div class="status-grid" aria-label="当前项目状态">
-          <div class="status-card"><strong>协议链路已实现</strong><span>DNS-SD 发现 · IPP 接收 · Windows 队列投递</span></div>
-          <div class="status-card"><strong>1.0.0 实机通过</strong><span>Apple 系统打印 · 实体队列出纸</span></div>
-          <div class="status-card"><strong>轻量后台</strong><span>无窗口不加载 WebView · 托盘按需重建</span></div>
+        <div class="status-grid" aria-label="Current project status">
+          <div class="status-card"><strong>Protocol flow implemented</strong><span>DNS-SD discovery · IPP reception · Windows queue delivery</span></div>
+          <div class="status-card"><strong>2.0.0.stable verified on a real device</strong><span>Apple system print dialog · physical printer output</span></div>
+          <div class="status-card"><strong>Lightweight background mode</strong><span>WebView unloaded when hidden · tray recreated on demand</span></div>
         </div>
 
         <section class="content" id="overview" aria-labelledby="overview-heading">
-          <span class="section-kicker">01 / Overview</span><h2 id="overview-heading">项目概览</h2>
-          <p class="intro">此文档对应 <code>direct-printer-broadcast</code> 分支。AirPrinter 是面向 Windows 10/11 的 Tauri 桌面程序，可分别发布已安装驱动的 Windows 队列。Apple 客户端通过 mDNS 找到共享队列后，使用 IPP/HTTP 发送作业，由对应的 Windows 驱动处理。</p>
+          <span class="section-kicker">01 / Overview</span><h2 id="overview-heading">Project overview</h2>
+          <p class="intro">This document describes the <code>direct-printer-broadcast</code> branch. AirPrinter is a Tauri desktop app for Windows 10 and 11 that can share installed Windows printer queues individually. Apple clients discover a shared queue over mDNS and send jobs over IPP/HTTP for processing by its Windows driver.</p>
           <div class="card-grid">
-            <div class="card"><span class="number">01</span><h3>每队列独立发布</h3><p>PC 上可分别开启多个 Windows 打印队列；每台队列有独立的 <code>/ipp/print/&lt;id&gt;</code> 资源路径和发现身份。</p></div>
-            <div class="card"><span class="number">02</span><h3>轻量后台运行</h3><p>关闭界面后释放 WebView，打印共享继续运行；前台每 30 秒、后台每 5 分钟检查 Windows 队列状态。</p></div>
+            <div class="card"><span class="number">01</span><h3>Independent queue sharing</h3><p>Share multiple Windows queues independently. Each queue has its own <code>/ipp/print/&lt;id&gt;</code> resource path and discovery identity.</p></div>
+            <div class="card"><span class="number">02</span><h3>Lightweight background operation</h3><p>Closing the window unloads the WebView while printer sharing continues. Queue status is checked every 30 seconds in the foreground and every 5 minutes in the background.</p></div>
           </div>
         </section>
 
         <section class="content" id="quickstart" aria-labelledby="quickstart-heading">
-          <span class="section-kicker">02 / Use it</span><h2 id="quickstart-heading">快速开始</h2>
+          <span class="section-kicker">02 / Getting started</span><h2 id="quickstart-heading">Getting started</h2>
           <div class="card-grid">
-            <div class="card"><span class="number">1</span><h3>准备 Windows 打印机</h3><p>安装打印机驱动，确认 PC 本地测试页可以正常输出。USB、网络和已配对队列均可使用；PDF、XPS、OneNote、Fax 等交互式虚拟目的地不会作为实体打印机显示。</p></div>
-            <div class="card"><span class="number">2</span><h3>开启需要共享的队列</h3><p>在程序列表中分别开启真实队列；如 Windows 防火墙阻止访问，可单独开启局域网规则。</p></div>
-            <div class="card"><span class="number">3</span><h3>连接同一局域网</h3><p>PC 可通过网线接路由器，iPhone、iPad、Mac 可用 Wi-Fi。两侧必须能互通；访客网络与 AP 隔离会阻止发现。</p></div>
-            <div class="card"><span class="number">4</span><h3>从系统打印界面选择队列</h3><p>在 Apple 设备支持打印的应用中打开系统打印界面，选择已共享的队列。停止其中一台队列不影响另一台。</p></div>
+            <div class="card"><span class="number">1</span><h3>Set up a Windows printer</h3><p>Install its driver and confirm that a local Windows test page prints successfully. USB, network, and paired queues are supported. Interactive virtual destinations such as PDF, XPS, OneNote, and Fax are not shown as physical printers.</p></div>
+            <div class="card"><span class="number">2</span><h3>Share the queues you need</h3><p>Enable each physical queue in the app. If Windows Firewall blocks access, enable the local network rule.</p></div>
+            <div class="card"><span class="number">3</span><h3>Connect to the same local network</h3><p>The PC can use Ethernet while an iPhone, iPad, or Mac uses Wi-Fi through the same router. Devices must be able to communicate; guest networks and AP isolation block discovery.</p></div>
+            <div class="card"><span class="number">4</span><h3>Select the queue in the system print dialog</h3><p>Open the system print dialog in an app that supports printing on your Apple device, then select the shared queue. Stopping one queue does not affect another.</p></div>
           </div>
-          <div class="callout warning"><strong>当前验证范围</strong><p>用户已确认直接广播方案完成一次 Apple 系统打印与实体出纸；更多系统版本、文档格式和打印选项仍需扩展验收。规范差距见 <a href="conformance-plan.md">符合性计划</a>。</p></div>
+          <div class="callout warning"><strong>Validation status</strong><p>The direct-broadcast implementation has successfully completed real-device Apple system printing and produced a physical print. More OS versions, document formats, and print options still need validation. See the <a href="conformance-plan.md">conformance plan</a> for known gaps.</p></div>
         </section>
 
         <section class="content" id="architecture" aria-labelledby="architecture-heading">
-          <span class="section-kicker">03 / Architecture</span><h2 id="architecture-heading">工作原理</h2>
-          <p class="intro">在手机系统打印面板选择已共享的队列、设置选项并点击打印，PC 自动接收、渲染并投递到该队列。日常使用无需下载文档、打开查看器或在 PC 再次确认；浏览器测试页仅用于连接诊断。</p>
-          <div class="flow" role="list" aria-label="打印处理流程">
-            <div class="flow-step" role="listitem"><span class="step-number">STEP 01</span><strong>检测队列</strong><small>Windows 驱动与能力</small></div>
-            <div class="flow-step" role="listitem"><span class="step-number">STEP 02</span><strong>广播服务</strong><small>mDNS / DNS-SD</small></div>
-            <div class="flow-step" role="listitem"><span class="step-number">STEP 03</span><strong>接收作业</strong><small>IPP over HTTP</small></div>
-            <div class="flow-step" role="listitem"><span class="step-number">STEP 04</span><strong>渲染页面</strong><small>PDF / JPEG / Raster</small></div>
-            <div class="flow-step" role="listitem"><span class="step-number">STEP 05</span><strong>交给驱动</strong><small>GDI / Windows Spooler</small></div>
+          <span class="section-kicker">03 / Architecture</span><h2 id="architecture-heading">How it works</h2>
+          <p class="intro">Choose a shared queue in the phone's system print dialog, set options, and tap Print. The PC receives and renders the job, then sends it to that queue. Everyday printing does not require downloading a document, opening a viewer, or confirming again on the PC; the browser test page is only for connection diagnostics.</p>
+          <div class="flow" role="list" aria-label="Print job processing flow">
+            <div class="flow-step" role="listitem"><span class="step-number">STEP 01</span><strong>Detect queues</strong><small>Windows drivers and capabilities</small></div>
+            <div class="flow-step" role="listitem"><span class="step-number">STEP 02</span><strong>Advertise services</strong><small>mDNS / DNS-SD</small></div>
+            <div class="flow-step" role="listitem"><span class="step-number">STEP 03</span><strong>Receive jobs</strong><small>IPP over HTTP</small></div>
+            <div class="flow-step" role="listitem"><span class="step-number">STEP 04</span><strong>Render pages</strong><small>PDF / JPEG / raster</small></div>
+            <div class="flow-step" role="listitem"><span class="step-number">STEP 05</span><strong>Send to the driver</strong><small>GDI / Windows Spooler</small></div>
           </div>
-          <div class="callout"><strong>作业状态</strong><p>IPP 先返回待处理状态，后续可查询或取消。Windows 队列消耗作业只能证明队列阶段结束，不能独立证明纸张已经输出。</p></div>
+          <div class="callout"><strong>Job status</strong><p>IPP first returns a pending state; the job can later be queried or canceled. A job leaving the Windows queue only confirms that the queue stage finished; it does not by itself confirm physical output.</p></div>
         </section>
 
         <section class="content" id="protocol" aria-labelledby="protocol-heading">
-          <span class="section-kicker">04 / Protocol</span><h2 id="protocol-heading">协议与文档格式</h2>
-          <div class="table-wrap"><table><thead><tr><th>环节</th><th>当前实现</th><th>说明</th></tr></thead><tbody>
-            <tr><td>局域网发现</td><td>每队列独立：<code>_ipp._tcp</code>、<code>_universal._sub._ipp._tcp</code>、<code>_printer._tcp</code></td><td><code>_printer._tcp</code> 使用端口 0；规范子类型及 LOC 的待办见符合性计划。</td></tr>
-            <tr><td>传输</td><td>IPP/HTTP，每队列路径 <code>/ipp/print/&lt;id&gt;</code></td><td>支持 Print-Job、Validate-Job、Create-Job、Send-Document（单文档）、Get-Job-Attributes、Get-Jobs 与 Cancel-Job。作业按路径绑定 Windows 队列。</td></tr>
-            <tr><td>文档格式</td><td>PDF、JPEG、URF、PWG Raster</td><td>PDF 使用 Windows PDF API；图像与所公布的光栅格式经渲染后由 GDI 交给驱动。</td></tr>
-            <tr><td>打印选项</td><td>作业名、彩色、双面、份数、纸型、质量、方向、页码、缩放</td><td>页码按收到的文档编号；缩放支持适合页面、填满、原始尺寸和自动模式。其余选项按 Windows 驱动能力公布；不支持的值会被拒绝。</td></tr>
+          <span class="section-kicker">04 / Protocol</span><h2 id="protocol-heading">Protocols and document formats</h2>
+          <div class="table-wrap"><table><thead><tr><th>Stage</th><th>Implementation</th><th>Details</th></tr></thead><tbody>
+            <tr><td>Local discovery</td><td>Per queue: <code>_ipp._tcp</code>, <code>_universal._sub._ipp._tcp</code>, <code>_printer._tcp</code></td><td><code>_printer._tcp</code> uses port 0. See the conformance plan for pending subtype and LOC work.</td></tr>
+            <tr><td>Transport</td><td>IPP/HTTP, with a per-queue path <code>/ipp/print/&lt;id&gt;</code></td><td>Supports Print-Job, Validate-Job, Create-Job, single-document Send-Document, Get-Job-Attributes, Get-Jobs, and Cancel-Job. The path binds each job to its Windows queue.</td></tr>
+            <tr><td>Document formats</td><td>PDF, JPEG, URF, PWG Raster</td><td>PDF uses the Windows PDF API. Images and advertised raster formats are rendered and sent to the driver through GDI.</td></tr>
+            <tr><td>Print options</td><td>Job name, color, duplex, copies, media size, quality, orientation, page range, scaling</td><td>Page numbers refer to the received document. Scaling supports fit, fill, actual size, and automatic modes. Other options follow Windows driver capabilities; unsupported values are rejected.</td></tr>
           </tbody></table></div>
-          <p class="muted" style="margin-top: 15px">首选 IPP 端口 631；若被占用，使用 8631–8699 中的空闲端口，并通过 DNS-SD 公布实际值。<code>ipp://</code> URI 可省略默认的 631，HTTP <code>Host</code> 仍需指向连接端口。</p>
-          <div class="callout warning"><strong>兼容性声明</strong><p>直接广播方案已完成一次 Apple 实机打印，但项目尚未通过完整 IPP Everywhere 1.1 一致性。当前未发布 <code>_print._sub._ipp._tcp</code>，也未声称支持全部规范扩展。URF 是为了客户端互操作提供的文档格式；发现与传输仍走 DNS-SD 和 IPP。</p></div>
+          <p class="muted" style="margin-top: 15px">IPP port 631 is preferred. If it is occupied, an available port from 8631–8699 is used and advertised through DNS-SD. An <code>ipp://</code> URI may omit the default port 631; the HTTP <code>Host</code> header must still match the connection port.</p>
+          <div class="callout warning"><strong>Compatibility</strong><p>The direct-broadcast implementation has completed a real-device Apple print, but the project has not passed full IPP Everywhere 1.1 conformance. It does not currently advertise <code>_print._sub._ipp._tcp</code> or claim support for every standards extension. URF is a document format for client interoperability; discovery and transport still use DNS-SD and IPP.</p></div>
         </section>
 
         <section class="content" id="network" aria-labelledby="network-heading">
-          <span class="section-kicker">05 / Network</span><h2 id="network-heading">网络与安全</h2>
+          <span class="section-kicker">05 / Network</span><h2 id="network-heading">Network and security</h2>
           <div class="split">
-            <div class="card"><h3>需要连通的端口</h3><ul><li>UDP <code>5353</code>：mDNS 发现</li><li>TCP <code>631</code>：首选 IPP</li><li>TCP <code>8631–8699</code>：631 被占用时的备用范围</li></ul><p>网线与 Wi-Fi 可以连接同一路由器；需要允许设备间通信与多播。</p></div>
-            <div class="card"><h3>有意开启的访问</h3><p>“允许局域网访问”会触发 Windows 管理员提示。通过后，规则仅针对 AirPrinter EXE 和本地子网，覆盖 Windows Private/Public 网络配置。</p><p style="margin-top: 10px">IPP 端点没有身份验证；请只在可信局域网启用共享。</p></div>
+            <div class="card"><h3>Ports that must be reachable</h3><ul><li>UDP <code>5353</code>: mDNS discovery</li><li>TCP <code>631</code>: preferred IPP port</li><li>TCP <code>8631–8699</code>: fallback range when 631 is occupied</li></ul><p>Ethernet and Wi-Fi can connect through the same router. Device-to-device communication and multicast must be allowed.</p></div>
+            <div class="card"><h3>Explicit network access</h3><p>“Allow local network access” triggers a Windows administrator prompt. Once approved, the rule applies only to the AirPrinter executable and local subnet across Windows Private/Public network profiles.</p><p style="margin-top: 10px">The IPP endpoint has no authentication. Enable sharing only on a trusted local network.</p></div>
           </div>
-          <p class="code-label">管理员 PowerShell 中的手动替代命令</p>
+          <p class="code-label">Manual alternative in an administrator PowerShell session</p>
           <pre><code>.\scripts\enable_firewall.ps1 -Program (Resolve-Path .\src-tauri\target\debug\airprinter.exe)</code></pre>
-          <p class="muted">使用安装版时，将 EXE 路径改为实际安装位置。打开此 HTML 文档不会修改网络或防火墙设置。</p>
+          <p class="muted">For an installed build, replace the EXE path with its actual location. Opening this HTML document does not change network or firewall settings.</p>
         </section>
 
         <section class="content" id="development" aria-labelledby="development-heading">
-          <span class="section-kicker">06 / Build</span><h2 id="development-heading">开发与构建</h2>
-          <p class="intro">前端使用 TypeScript、Vite、Tailwind CSS 与 DaisyUI；后端使用 Rust、Tauri 2、<code>mdns-sd</code>、<code>tiny_http</code> 和 <code>ipp</code>。Windows 侧使用已安装的打印驱动与系统 PDF/图像 API。</p>
-          <p class="code-label">在项目根目录执行</p>
+          <span class="section-kicker">06 / Build</span><h2 id="development-heading">Development and builds</h2>
+          <p class="intro">The frontend uses TypeScript, Vite, Tailwind CSS, and DaisyUI. The backend uses Rust, Tauri 2, <code>mdns-sd</code>, <code>tiny_http</code>, and <code>ipp</code>. Windows printing uses installed printer drivers and system PDF/image APIs.</p>
+          <p class="code-label">Run from the project root</p>
           <pre><code>pnpm install
 pnpm tauri dev
 pnpm tauri build</code></pre>
-          <p class="muted">仅构建前端可运行 <code>pnpm build</code>。本机依赖目录由较新 pnpm 校验时，可运行 <code>pnpm --config.verify-deps-before-run=false run build</code>。</p>
+          <p class="muted">Run <code>pnpm build</code> to build only the frontend. If a newer pnpm version rejects the local dependency directory, use <code>pnpm --config.verify-deps-before-run=false run build</code>.</p>
         </section>
 
         <section class="content" id="testing" aria-labelledby="testing-heading">
-          <span class="section-kicker">07 / Verify</span><h2 id="testing-heading">验证与当前边界</h2>
+          <span class="section-kicker">07 / Validation</span><h2 id="testing-heading">Validation and current limitations</h2>
           <div class="card-grid">
-            <div class="card"><h3>已本地验证</h3><p>既有 Rust 测试涵盖独立队列、路由与虚拟队列输出；当前改动的测试结果以本轮审计记录为准。</p></div>
-            <div class="card"><h3>实机范围</h3><p>直接广播已完成一次真实 Apple 系统提交与实体出纸；多系统版本、格式、双面、份数、纸型和异常状态仍需继续验证。</p></div>
+            <div class="card"><h3>Local validation</h3><p>Existing Rust tests cover independent queues, routing, and virtual-queue output. See the current review record for test results for the latest changes.</p></div>
+            <div class="card"><h3>Real-device coverage</h3><p>Direct broadcasting has completed a real Apple system print and produced a physical print. More OS versions, formats, duplex settings, copies, media sizes, and error states still need validation.</p></div>
           </div>
-          <div class="callout"><strong>仅接收诊断模式</strong><p>可使用 <code>airprinter.exe --receive-only "绝对路径"</code> 将收到的文档保存为待处理作业，不调用打印驱动。该模式只用于接收链路诊断。普通模式会自动处理和投递作业，无需用户下载文档或手动打印。</p></div>
-          <p class="code-label">协议和本地打印模拟</p>
+          <div class="callout"><strong>Receive-only diagnostic mode</strong><p>Use <code>airprinter.exe --receive-only "absolute path"</code> to save received documents as pending jobs without calling the printer driver. This mode is only for diagnosing job reception. Normal mode processes and routes jobs automatically; users do not need to download documents or print them manually.</p></div>
+          <p class="code-label">Protocol and local print simulation</p>
           <pre><code>cargo test --manifest-path src-tauri/Cargo.toml --locked
 cargo test --manifest-path src-tauri/Cargo.toml --locked -- --include-ignored --nocapture
 python scripts/diagnose_mdns.py --self-test</code></pre>
-          <p class="code-label">独立 Node.js 客户端模拟</p>
+          <p class="code-label">Standalone Node.js client simulation</p>
           <pre><code>cargo build --manifest-path src-tauri/Cargo.toml --example simulate_lan --locked
 node scripts/simulate_airprint.mjs 172.22.48.1</code></pre>
-          <p class="muted">JS 命令的 IP 应替换为本机主机专用虚拟网卡地址。此电脑的 Hyper-V 默认交换机不回送 mDNS 多播，因此该脚本将 DNS-SD 部分明确标为隔离 UDP 模拟；IPP 请求仍会访问真实 Rust 服务，且不会向虚构队列提交打印作业。</p>
-          <p class="code-label">从另一台设备检查实际广播</p>
+          <p class="muted">Replace the IP in the JavaScript command with the host-only virtual adapter address on your machine. This computer's Hyper-V default switch does not loop back mDNS multicast, so the script labels the DNS-SD portion as an isolated UDP simulation. IPP requests still reach the real Rust service and do not submit jobs to a fictitious queue.</p>
+          <p class="code-label">Check live broadcasts from another device</p>
           <pre><code>python scripts/diagnose_mdns.py --seconds 8</code></pre>
-          <p class="muted">资源上限：单次上传 64 MiB、光栅解码累计 512 MiB、最多 500 页、单次 Windows 投递 120 秒、最多 4 个正在处理及 32 个未结束作业。</p>
+          <p class="muted">Resource limits: 64 MiB per upload, 512 MiB total raster decoding, 500 pages, 120 seconds per Windows submission, 4 jobs processing concurrently, and 32 unfinished jobs.</p>
         </section>
 
         <section class="content" id="files" aria-labelledby="files-heading">
-          <span class="section-kicker">08 / Source map</span><h2 id="files-heading">源码入口与参考</h2>
-          <div class="table-wrap"><table><thead><tr><th>路径</th><th>职责</th></tr></thead><tbody>
-            <tr><td><a href="../src/components/PrinterList.ts">PrinterList.ts</a></td><td>Windows 队列逐台共享、停止与局域网放行入口</td></tr>
-            <tr><td><a href="../src-tauri/src/services/printer_detector.rs">printer_detector.rs</a></td><td>Windows 队列检测与能力解析</td></tr>
-            <tr><td><a href="../src-tauri/src/services/airprint_server.rs">airprint_server.rs</a></td><td>各 Windows 队列的独立 DNS-SD、IPP 服务与生命周期</td></tr>
-            <tr><td><a href="../src-tauri/src/services/mdns_broadcaster.rs">mdns_broadcaster.rs</a></td><td>DNS-SD/mDNS 注册、更新和撤回</td></tr>
-            <tr><td><a href="../src-tauri/src/services/ipp/server.rs">ipp/server.rs</a></td><td>IPP/HTTP 请求、打印机属性与作业管理</td></tr>
-            <tr><td><a href="../src-tauri/src/services/print_job.rs">print_job.rs</a> · <a href="../src-tauri/src/services/raster.rs">raster.rs</a></td><td>文档投递、Windows 作业状态与光栅解码</td></tr>
-            <tr><td><a href="../scripts/diagnose_mdns.py">diagnose_mdns.py</a> · <a href="../scripts/simulate_airprint.mjs">simulate_airprint.mjs</a></td><td>发现诊断与隔离客户端模拟</td></tr>
+          <span class="section-kicker">08 / Source map</span><h2 id="files-heading">Source map and references</h2>
+          <div class="table-wrap"><table><thead><tr><th>Path</th><th>Responsibility</th></tr></thead><tbody>
+            <tr><td><a href="../src/components/PrinterList.ts">PrinterList.ts</a></td><td>Per-queue sharing, stopping, and local network access controls</td></tr>
+            <tr><td><a href="../src-tauri/src/services/printer_detector.rs">printer_detector.rs</a></td><td>Windows queue detection and capability parsing</td></tr>
+            <tr><td><a href="../src-tauri/src/services/airprint_server.rs">airprint_server.rs</a></td><td>Independent DNS-SD and IPP services and lifecycle for Windows queues</td></tr>
+            <tr><td><a href="../src-tauri/src/services/mdns_broadcaster.rs">mdns_broadcaster.rs</a></td><td>DNS-SD/mDNS registration, updates, and withdrawal</td></tr>
+            <tr><td><a href="../src-tauri/src/services/ipp/server.rs">ipp/server.rs</a></td><td>IPP/HTTP requests, printer attributes, and job management</td></tr>
+            <tr><td><a href="../src-tauri/src/services/print_job.rs">print_job.rs</a> · <a href="../src-tauri/src/services/raster.rs">raster.rs</a></td><td>Document submission, Windows job status, and raster decoding</td></tr>
+            <tr><td><a href="../scripts/diagnose_mdns.py">diagnose_mdns.py</a> · <a href="../scripts/simulate_airprint.mjs">simulate_airprint.mjs</a></td><td>Discovery diagnostics and isolated client simulation</td></tr>
           </tbody></table></div>
-          <div class="links" style="margin-top: 19px"><a href="../README.md">项目 README</a><a href="backend-audit.md">后端审核记录</a><a href="cs-ippeve11-20200515-5100.14.pdf">IPP Everywhere 文档 PDF</a><a href="https://www.rfc-editor.org/rfc/rfc6763">RFC 6763 · DNS-SD</a><a href="https://www.rfc-editor.org/rfc/rfc8010">RFC 8010 · IPP 传输</a></div>
+          <div class="links" style="margin-top: 19px"><a href="../README.md">Project README</a><a href="backend-audit.md">Backend review</a><a href="cs-ippeve11-20200515-5100.14.pdf">IPP Everywhere specification PDF</a><a href="https://www.rfc-editor.org/rfc/rfc6763">RFC 6763 · DNS-SD</a><a href="https://www.rfc-editor.org/rfc/rfc8010">RFC 8010 · IPP transport</a></div>
         </section>
 
-        <footer>AirPrinter · 静态 HTML 项目文档。内容以当前仓库实现为准；实体设备与 Apple 客户端的验收状态见“验证与当前边界”。</footer>
+        <section class="content" id="license" aria-labelledby="license-heading">
+          <span class="section-kicker">09 / License and support</span><h2 id="license-heading">License and support</h2>
+          <div class="split">
+            <div class="card"><h3>MIT License</h3><p>AirPrinter is released under the MIT License. See the <a href="../LICENSE">LICENSE</a> file for the full terms.</p></div>
+            <div class="card"><h3>Support development</h3><p>If AirPrinter is useful to you, you can support its development through PayPal: <a href="mailto:licher255@outlook.com">licher255@outlook.com</a>.</p></div>
+          </div>
+        </section>
+
+        <footer>AirPrinter · Static project documentation. Content reflects the current repository implementation. See “Validation and current limitations” for real-device and Apple client status.</footer>
       </main>
     </div>
   </body>

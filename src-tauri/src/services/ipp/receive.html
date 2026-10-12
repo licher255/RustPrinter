@@ -1,9 +1,9 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>AirPrinter 仅接收</title>
+  <title>AirPrinter Receive Only</title>
   <style>
     :root { color-scheme: light dark; font: 16px system-ui, sans-serif; }
     body { max-width: 38rem; margin: 3rem auto; padding: 0 1rem; }
@@ -18,12 +18,12 @@
 </head>
 <body>
   <main id="receiver" data-printer-path="__PRINTER_PATH__">
-    <h1>接收文件</h1>
-    <p>此页面仅接收并保存一个 PDF 或 JPEG 文件，不会打印。</p>
-    <label for="document">选择 PDF 或 JPEG 文件</label>
+    <h1>Receive a File</h1>
+    <p>This page only receives and saves a PDF or JPEG file. It does not print.</p>
+    <label for="document">Choose a PDF or JPEG file</label>
     <input id="document" type="file" accept=".pdf,.jpg,.jpeg,application/pdf,image/jpeg">
-    <button id="upload" type="button">上传并保存</button>
-    <p id="status" role="status" aria-live="polite">请选择文件。</p>
+    <button id="upload" type="button">Upload and Save</button>
+    <p id="status" role="status" aria-live="polite">Please choose a file.</p>
   </main>
   <script>
     (() => {
@@ -52,7 +52,7 @@
       function textAttribute(tag, name, value) {
         const nameBytes = encoder.encode(name);
         const valueBytes = encoder.encode(value);
-        if (nameBytes.length > 255 || valueBytes.length > 65535) throw new Error("IPP 属性过长。");
+        if (nameBytes.length > 255 || valueBytes.length > 65535) throw new Error("IPP attribute is too long.");
         return join([Uint8Array.of(tag), Uint8Array.from(u16(nameBytes.length)), nameBytes,
           Uint8Array.from(u16(valueBytes.length)), valueBytes]);
       }
@@ -75,11 +75,11 @@
         return join(parts);
       }
       function parseResponse(bytes, expectedId) {
-        if (bytes.length < 9) throw new Error("打印服务返回的 IPP 响应过短。");
+        if (bytes.length < 9) throw new Error("The print service returned an IPP response that is too short.");
         const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
         const statusCode = view.getUint16(2, false);
-        if (view.getUint32(4, false) !== expectedId) throw new Error("IPP 响应编号不匹配。");
-        if (statusCode >= 0x0400) throw new Error(`IPP 请求失败（状态 0x${statusCode.toString(16)}）。`);
+        if (view.getUint32(4, false) !== expectedId) throw new Error("The IPP response ID does not match the request.");
+        if (statusCode >= 0x0400) throw new Error(`IPP request failed (status 0x${statusCode.toString(16)}).`);
         const attrs = {};
         let index = 8;
         let previousName = "";
@@ -88,13 +88,13 @@
           const tag = bytes[index++];
           if (tag === 3) { ended = true; break; }
           if (tag < 0x10) { previousName = ""; continue; }
-          if (index + 2 > bytes.length) throw new Error("IPP 属性名称格式错误。");
+          if (index + 2 > bytes.length) throw new Error("Malformed IPP attribute name.");
           const nameLength = view.getUint16(index, false); index += 2;
-          if (index + nameLength + 2 > bytes.length) throw new Error("IPP 属性格式错误。");
+          if (index + nameLength + 2 > bytes.length) throw new Error("Malformed IPP attribute.");
           if (nameLength) previousName = decoder.decode(bytes.subarray(index, index + nameLength));
           index += nameLength;
           const valueLength = view.getUint16(index, false); index += 2;
-          if (index + valueLength > bytes.length) throw new Error("IPP 属性值格式错误。");
+          if (index + valueLength > bytes.length) throw new Error("Malformed IPP attribute value.");
           const valueBytes = bytes.subarray(index, index + valueLength); index += valueLength;
           if (!previousName) continue;
           const value = (tag === 0x21 || tag === 0x23) && valueLength === 4
@@ -105,7 +105,7 @@
               ? [...attrs[previousName], value] : [attrs[previousName], value];
           } else attrs[previousName] = value;
         }
-        if (!ended) throw new Error("IPP 响应不完整，缺少结束标记。");
+        if (!ended) throw new Error("The IPP response is incomplete; the end-of-attributes tag is missing.");
         return attrs;
       }
       async function ippPost(url, header, file) {
@@ -114,7 +114,7 @@
           "Content-Type": "application/ipp",
           "X-AirPrinter-Receive-Only": "1"
         }, body, cache: "no-store" });
-        if (!response.ok) throw new Error(`AirPrinter 返回 HTTP ${response.status}。`);
+        if (!response.ok) throw new Error(`AirPrinter returned HTTP ${response.status}.`);
         return response.arrayBuffer();
       }
       function formatFor(file) {
@@ -124,9 +124,9 @@
         const mime = file.type.toLowerCase();
         const byMime = mime === "application/pdf" ? "application/pdf"
           : (mime === "image/jpeg" || mime === "image/jpg") ? "image/jpeg" : null;
-        if (byExtension && byMime && byExtension !== byMime) throw new Error("文件扩展名与文件类型不一致。");
+        if (byExtension && byMime && byExtension !== byMime) throw new Error("The file extension does not match its file type.");
         const format = byMime || byExtension;
-        if (!format) throw new Error("仅支持 PDF 和 JPEG 文件。");
+        if (!format) throw new Error("Only PDF and JPEG files are supported.");
         return format;
       }
       async function pollJob(uri, jobId) {
@@ -145,24 +145,24 @@
               && /diagnostic only/i.test(message) && /no Windows print submitted/i.test(message)
               && /Saved:/i.test(message)) return message;
           if (jobState === 7 || jobState === 8 || jobState === 9) {
-            throw new Error(message || `IPP 作业已结束，状态为 ${jobState}。`);
+            throw new Error(message || `The IPP job ended with status ${jobState}.`);
           }
-          status.textContent = `文件已发送，正在等待保存确认（作业 ${jobId}，状态 ${jobState}）。`;
+          status.textContent = `File sent. Waiting for save confirmation (job ${jobId}, status ${jobState}).`;
           await new Promise(resolve => setTimeout(resolve, 500));
         }
-        throw new Error("等待保存确认超时。");
+        throw new Error("Timed out while waiting for save confirmation.");
       }
       button.addEventListener("click", async () => {
         if (button.disabled) return;
         const file = fileInput.files && fileInput.files[0];
-        if (!file) { status.textContent = "请先选择 PDF 或 JPEG 文件。"; return; }
+        if (!file) { status.textContent = "Please choose a PDF or JPEG file first."; return; }
         button.disabled = true;
         fileInput.disabled = true;
         try {
           const format = formatFor(file);
-          if (file.size > MAX_DOCUMENT_BYTES) throw new Error("文件超过 64 MiB 接收限制。");
-          if (encoder.encode(file.name).length > 255) throw new Error("文件名过长，无法通过 IPP 发送。");
-          status.textContent = `正在上传 ${file.name}（${file.size} 字节），请保持此页面打开。`;
+          if (file.size > MAX_DOCUMENT_BYTES) throw new Error("The file exceeds the 64 MiB receive limit.");
+          if (encoder.encode(file.name).length > 255) throw new Error("The file name is too long to send over IPP.");
+          status.textContent = `Uploading ${file.name} (${file.size} bytes). Keep this page open.`;
           const printerUri = `${location.protocol === "https:" ? "ipps" : "ipp"}://${location.host}${path}`;
           const id = requestId();
           const jobName = textAttribute(0x42, "job-name", file.name);
@@ -170,11 +170,11 @@
           const header = ippHeader(0x0002, id, printerUri, [documentFormat], [jobName]);
           const attrs = parseResponse(new Uint8Array(await ippPost(path, header, file)), id);
           const jobId = attrs["job-id"];
-          if (!Number.isInteger(jobId) || jobId < 1) throw new Error("IPP 响应中没有有效的作业编号。");
+          if (!Number.isInteger(jobId) || jobId < 1) throw new Error("The IPP response does not contain a valid job ID.");
           const saved = await pollJob(printerUri, jobId);
-          status.textContent = `已接收并保存，不会打印。\n${saved}`;
+          status.textContent = `Received and saved. The file will not be printed.\n${saved}`;
         } catch (error) {
-          status.textContent = `接收失败。\n${error instanceof Error ? error.message : String(error)}`;
+          status.textContent = `Receive failed.\n${error instanceof Error ? error.message : String(error)}`;
         } finally {
           button.disabled = false;
           fileInput.disabled = false;

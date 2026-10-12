@@ -1,22 +1,22 @@
 <!doctype html>
-<html lang="zh">
+<html lang="en">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>AirPrinter 网络诊断</title>
+<title>AirPrinter Network Diagnostics</title>
 <style>
   body { font: 16px system-ui; max-width: 680px; margin: 32px auto; padding: 0 18px; line-height: 1.6 }
   button { font: inherit; padding: 12px 18px; margin: 6px 0 }
   pre { white-space: pre-wrap; word-break: break-all; background: #eee; padding: 14px }
   code { overflow-wrap: anywhere }
 </style>
-<h1>AirPrinter 网络诊断</h1>
-<p>此页面由电脑上的 AirPrinter 提供。先检查连接；测试打印会实际向打印机发送一张四色测试页。</p>
-<p>IPP 路径：<code id="path">__PATH__</code></p>
-<button id="check">检查 IPP 连接</button>
-<pre id="check-result">等待检查</pre>
-<button id="print">打印一张测试页（会实际出纸）</button>
-<button id="refresh">刷新测试作业状态</button>
-<pre id="print-result">尚未提交测试作业</pre>
+<h1>AirPrinter Network Diagnostics</h1>
+<p>This page is served by AirPrinter on your computer. Check the connection first. Test printing sends an actual four-color test page to the printer.</p>
+<p>IPP path: <code id="path">__PATH__</code></p>
+<button id="check">Check IPP Connection</button>
+<pre id="check-result">Waiting to check</pre>
+<button id="print">Print a Test Page (will print on paper)</button>
+<button id="refresh">Refresh Test Job Status</button>
+<pre id="print-result">No test job submitted yet</pre>
 <script>
 const path = document.getElementById('path').textContent;
 const checkResult = document.getElementById('check-result');
@@ -47,52 +47,52 @@ async function ipp(operation, extra, documentBytes = []) {
 
 function formatStatus(result) {
   return 'HTTP ' + result.http + '\nIPP ' +
-    (result.status === null ? '响应过短' : '0x' + result.status.toString(16).padStart(4, '0'));
+    (result.status === null ? 'Response too short' : '0x' + result.status.toString(16).padStart(4, '0'));
 }
 
 async function refreshJob() {
   const response = await fetch('/debug/jobs');
   const { job } = await response.json();
   if (!job) return null;
-  printResult.textContent = '测试作业 #' + job.id + '\nIPP 状态 ' + job.state +
-    '\n原因 ' + job.reason + '\nWindows 队列 ID ' + (job.spool_id ?? '尚未提交') +
-    (job.message ? '\n详情 ' + job.message : '');
+  printResult.textContent = 'Test job #' + job.id + '\nIPP status ' + job.state +
+    '\nReason ' + job.reason + '\nWindows queue ID ' + (job.spool_id ?? 'Not submitted yet') +
+    (job.message ? '\nDetails ' + job.message : '');
   return job;
 }
 
 document.getElementById('check').onclick = async () => {
-  checkResult.textContent = '正在查询…';
+  checkResult.textContent = 'Checking…';
   try {
     const result = await ipp(11, []);
-    checkResult.textContent = formatStatus(result) + '\n响应 ' + result.data.length +
-      ' 字节\nipp-features-supported: ' +
+    checkResult.textContent = formatStatus(result) + '\nResponse ' + result.data.length +
+      ' bytes\nipp-features-supported: ' +
       new TextDecoder().decode(result.data).includes('ipp-features-supported');
-  } catch (error) { checkResult.textContent = '连接失败：' + error; }
+  } catch (error) { checkResult.textContent = 'Connection failed: ' + error; }
 };
 
 document.getElementById('print').onclick = async () => {
-  printResult.textContent = '正在从手机传输测试页…';
+  printResult.textContent = 'Sending the test page from this device…';
   try {
     const imageResponse = await fetch('/debug/test.jpg');
-    if (!imageResponse.ok) throw new Error('测试图片下载失败：HTTP ' + imageResponse.status);
+    if (!imageResponse.ok) throw new Error('Failed to download the test image: HTTP ' + imageResponse.status);
     const image = new Uint8Array(await imageResponse.arrayBuffer());
     const result = await ipp(2, [
       ...attr(0x42, 'requesting-user-name', 'airprinter-debug'),
       ...attr(0x49, 'document-format', 'image/jpeg'),
     ], image);
-    printResult.textContent = formatStatus(result) + '\n已传输 ' + image.length + ' 字节';
+    printResult.textContent = formatStatus(result) + '\nSent ' + image.length + ' bytes';
     if (result.status !== 0) return;
     for (let attempt = 0; attempt < 20; attempt++) {
       await new Promise(resolve => setTimeout(resolve, 1000));
       const job = await refreshJob();
       if (job && job.state >= 7) break;
     }
-  } catch (error) { printResult.textContent = '测试失败：' + error; }
+  } catch (error) { printResult.textContent = 'Test failed: ' + error; }
 };
 
 document.getElementById('refresh').onclick = async () => {
-  try { if (!await refreshJob()) printResult.textContent = '还没有测试作业'; }
-  catch (error) { printResult.textContent = '查询失败：' + error; }
+  try { if (!await refreshJob()) printResult.textContent = 'No test job yet'; }
+  catch (error) { printResult.textContent = 'Query failed: ' + error; }
 };
 </script>
 </html>
