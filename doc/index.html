@@ -144,7 +144,7 @@
         </header>
         <div class="status-grid" aria-label="当前项目状态">
           <div class="status-card"><strong>协议链路已实现</strong><span>DNS-SD 发现 · IPP 接收 · Windows 队列投递</span></div>
-          <div class="status-card"><strong>本地验证已通过</strong><span>34 项库测试 · 虚拟入口至 Microsoft Print to PDF</span></div>
+          <div class="status-card"><strong>本地验证已通过</strong><span>40 项库测试 · 4 项硬件/网络测试忽略</span></div>
           <div class="status-card"><strong>实机验收待完成</strong><span>Apple 系统发现与实体出纸尚未验证</span></div>
         </div>
 
@@ -165,7 +165,7 @@
             <div class="card"><span class="number">3</span><h3>连接同一局域网</h3><p>PC 可通过网线接路由器，iPhone、iPad、Mac 可用 Wi-Fi。两侧必须能互通；访客网络与 AP 隔离会阻止发现。</p></div>
             <div class="card"><span class="number">4</span><h3>从系统打印界面选择 AirPrinter</h3><p>在 Apple 设备支持打印的应用中打开系统打印界面，选择 AirPrinter。PC 切换目标不会改变手机端选择；“关闭 AirPrinter”会停止虚拟入口。</p></div>
           </div>
-          <div class="callout warning"><strong>当前验证范围</strong><p>固定 HTTP 虚拟入口到 Microsoft Print to PDF 的单独测试已通过；真实手机原生提交和实体打印机出纸仍未验证。</p></div>
+          <div class="callout warning"><strong>当前验证范围</strong><p>此前固定 HTTP 虚拟入口到 Microsoft Print to PDF 的单独测试已有记录；真实手机原生提交和实体打印机出纸仍未验证。规范差距见 <a href="conformance-plan.md">符合性计划</a>。</p></div>
         </section>
 
         <section class="content" id="architecture" aria-labelledby="architecture-heading">
@@ -217,7 +217,7 @@ pnpm tauri build</code></pre>
         <section class="content" id="testing" aria-labelledby="testing-heading">
           <span class="section-kicker">07 / Verify</span><h2 id="testing-heading">验证与当前边界</h2>
           <div class="card-grid">
-            <div class="card"><h3>已本地验证</h3><p>34 项 Rust 库测试通过，4 项忽略；<code>cargo check --all-targets</code> 通过。固定 HTTP 虚拟入口到 Microsoft Print to PDF 的独立输出测试通过。</p></div>
+            <div class="card"><h3>已本地验证</h3><p>40 项 Rust 库测试通过，4 项忽略；<code>cargo check --all-targets --locked</code> 与前端构建通过。虚拟队列独立输出测试见后端审核记录。</p></div>
             <div class="card"><h3>尚未实机验证</h3><p>真实手机原生打印作业提交和实体打印机出纸仍未验证。虚拟队列测试不等于真实 iPhone/iPad/Mac 与实体打印机验收。</p></div>
           </div>
           <div class="callout"><strong>仅接收诊断模式</strong><p>可使用 <code>airprinter.exe --receive-only "绝对路径"</code> 将收到的文档保存为待处理作业，不调用打印驱动。该模式只用于接收链路诊断。普通模式会自动处理和投递作业，无需用户下载文档或手动打印。</p></div>

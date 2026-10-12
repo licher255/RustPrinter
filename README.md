@@ -27,7 +27,7 @@ Windows 队列与驱动能力
   → IPP 查询、取消和作业状态
 ```
 
-- 使用 Rust `mdns-sd` 广播单一固定的 AirPrinter 服务：`_ipp._tcp`、其 `_universal._sub._ipp._tcp` 发现子类型，以及端口为 0 的 `_printer._tcp` 标识服务。无需安装 Apple Bonjour SDK。
+- 使用 Rust `mdns-sd` 广播单一固定的 AirPrinter 服务：`_ipp._tcp`、其 `_universal._sub._ipp._tcp` 发现子类型，以及端口为 0 的 `_printer._tcp` 标识服务。规范子类型和 LOC 的差距见[符合性计划](doc/conformance-plan.md)。
 - 虚拟 URI 固定为 `/ipp/print`，不随 Windows 目标变化。PC 上切换目标后，新接收作业绑定新队列；已接收作业保留原目标。
 - 遵循 IPP 的默认端口语义：`ipp://` URI 可以省略 631，HTTP `Host` 仍按实际监听端口验证；Bonjour `.local` 名称和本机 IP 都可作为合法目标。
 - 每 30 秒同步 Windows 队列状态与驱动能力。单个 Windows 输出目标的选择保存在用户配置目录，不复制待打印文档。
@@ -44,7 +44,7 @@ Windows 队列与驱动能力
 
 发现使用 DNS-SD/mDNS，作业传输使用 IPP/HTTP。URF 是为了 Apple 客户端互操作实现的文档格式，不是替代 IPP 的私有传输协议；同时实现了 `doc/cs-ippeve11-20200515-5100.14.pdf` 中的 PWG Raster 格式路径。
 
-本项目目前**不宣称已通过完整 IPP Everywhere 1.1 认证，也不保证所有 Apple 系统版本**。`_print._sub._ipp._tcp` 和 `ipp-features-supported=ipp-everywhere` 不应仅为让设备出现而虚假声明；现实现还有完整规范的扩展操作、属性和认证测试待补。Apple 系统打印面板与真实硬件仍需实机互操作验收。
+本项目目前**不宣称已通过完整 IPP Everywhere 1.1 认证，也不保证所有 Apple 系统版本**。为保留已观察到的 Apple 发现路径，当前仍公布 `ipp-features-supported=ipp-everywhere`，但 `_print._sub._ipp._tcp`、LOC 和 PDF overrides 等 MUST 条款尚未完成；此标记不能作为完整符合性证明。Apple 系统打印面板与真实硬件仍需实机互操作验收。
 
 - [IPP Everywhere / PWG](https://www.pwg.org/ipp/everywhere.html)
 - [Apple 关于 AirPrint DNS-SD 子类型与 URF 的说明](https://support.apple.com/guide/deployment/dep3b4cf515/web)
@@ -83,7 +83,7 @@ pnpm tauri build
 Windows 管理员 PowerShell 中运行 `scripts/capture_print_chain.ps1 -OutputDirectory "E:\Tauri-Rust-Printer"` 可进行90秒限定抓包，同步记录手机631/8631流量、本子网mDNS、打印/USBMon事件及队列状态；产物在 `target/print-capture/`。用 `python -X utf8 scripts/analyze_print_capture.py <network.pcapng>` 分析原始报文。USBMon产物是驱动事件而非原始USB数据包。抓包可能含文档数据，只在本地保存并已从Git忽略。
 
 ```powershell
-# 协议、解析与路由测试（当前验证：34 项通过，4 项忽略）
+# 协议、解析与路由测试
 cargo test --manifest-path src-tauri/Cargo.toml --locked
 python scripts/diagnose_mdns.py --self-test
 powershell.exe -NoProfile -File scripts/check_print_options.ps1
@@ -103,7 +103,7 @@ python scripts/diagnose_mdns.py --seconds 8
 python scripts/diagnose_mdns.py --interface 192.168.1.10 --seconds 8
 ```
 
-当前验证包括 34 项 Rust 库测试通过、4 项忽略，`cargo check --all-targets` 通过，以及从固定 HTTP 虚拟入口提交作业并单独输出到 Microsoft Print to PDF 的测试通过。该验证不代表真实手机原生提交成功；真实 Apple 设备提交和实体打印机出纸仍未验证。
+本轮验证包括 40 项 Rust 库测试通过、4 项忽略，`cargo check --all-targets --locked` 与 `pnpm build` 通过。此前固定 HTTP 虚拟入口到 Microsoft Print to PDF 的独立输出测试已有记录；本轮未复测实体出纸。真实 Apple 设备原生提交和实体打印机出纸仍未验证。
 
 `http_to_windows_pdf_end_to_end` 通过 HTTP IPP 虚拟入口提交 URF，查询作业直到 Windows 队列结束，在 `src-tauri/target/airprint-simulation/` 留下 PDF 供检查。`windows_raster_spool_smoke` 检查四种文档格式，包括 PDF 再渲染打印。mDNS 测试验证解析和注销。
 
