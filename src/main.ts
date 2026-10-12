@@ -1,4 +1,5 @@
 import "@fortawesome/fontawesome-free/css/all.min.css";
+import { getVersion } from "@tauri-apps/api/app";
 import "./styles.css";
 import i18n from "./i18n";
 import { PrinterList } from "./components/PrinterList";
@@ -82,6 +83,20 @@ const setupNavigation = () => {
   });
 };
 
+const updateVersionLabel = async () => {
+  const label = document.getElementById("app-version");
+  if (!label) return;
+  let version = "2.0.0";
+  if ("__TAURI_INTERNALS__" in window) {
+    try {
+      version = await getVersion();
+    } catch {
+      // Keep the build-time fallback visible if the native API is unavailable.
+    }
+  }
+  label.textContent = `${version}.stable`;
+};
+
 document.addEventListener("DOMContentLoaded", async () => {
   if (!i18n.isInitialized) {
     await new Promise<void>((resolve) => {
@@ -91,6 +106,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   setupTitlebar();
   setupNavigation();
+  await updateVersionLabel();
   new PrinterList("printer-list-container");
   new Settings("settings-container");
   new LogPanel("log-panel-container");

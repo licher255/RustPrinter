@@ -1,6 +1,6 @@
 [package]
 name = "airprinter"
-version = "1.1.0"
+version = "2.0.0"
 description = "Share USB printers via AirPrint"
 default-run = "airprinter"
 authors = ["you"]
