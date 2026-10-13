@@ -1,11 +1,23 @@
 import "@fortawesome/fontawesome-free/css/all.min.css";
 import { getVersion } from "@tauri-apps/api/app";
+import { listen } from "@tauri-apps/api/event";
 import "./styles.css";
 import i18n from "./i18n";
 import { PrinterList } from "./components/PrinterList";
 import { LogPanel } from "./components/LogPanel";
 import { Settings } from "./components/Settings";
 import { setupTitlebar } from "./components/Titlebar";
+import { logService } from "./services/logService";
+
+/** Persistent background share failures (e.g. retry backoff) surface in the log panel. */
+const setupShareErrorListener = () => {
+  if (!("__TAURI_INTERNALS__" in window)) return;
+  void listen<string[]>("share-errors", (event) => {
+    for (const error of event.payload) {
+      logService.add(i18n.t("logs.reconcile_error", { error }), "error");
+    }
+  });
+};
 
 /**
  * 更新页面上所有标记了 data-i18n / data-i18n-title 的元素
@@ -106,6 +118,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   setupTitlebar();
   setupNavigation();
+  setupShareErrorListener();
   await updateVersionLabel();
   new PrinterList("printer-list-container");
   new Settings("settings-container");

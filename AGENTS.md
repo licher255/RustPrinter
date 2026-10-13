@@ -223,6 +223,13 @@ netsh advfirewall firewall add rule name="IPP Server" dir=in action=allow protoc
 - `scripts/diagnose_network.ps1` - Network diagnostics
 - `scripts/diagnose_mdns.py` - mDNS service discovery check
 
+### Reconcile Debounce (airprint_server.rs)
+
+The 30s/300s `reconcile()` loop flapping guards:
+- Offline withdrawal requires 2 consecutive bad polls (`OFFLINE_WITHDRAW_POLLS`) — sleeping USB printers must not flap the announcement.
+- color/duplex re-announce requires 2 consecutive identical readings (`CAPABILITY_CONFIRM_POLLS`); a poll matching the shared profile clears the staged change.
+- Failed auto-restore retries back off 30s→600s (`retry_delay`) and emit a `share-errors` event to the frontend log panel.
+
 ### Common Issues
 
 1. **Discovery App finds printer, iOS doesn't:**

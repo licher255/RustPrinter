@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 use airprinter::services::{AirPrintServer, PrinterDetector};
 use airprinter::*;
@@ -97,12 +97,21 @@ fn main() {
                 match detected {
                     Ok(printers) => {
                         if let Ok(mut server) = state.server.lock() {
-                            for error in server.reconcile(&printers) {
-                                eprintln!("[AirPrinter] 共享同步失败: {error}");
+                            let errors = server.reconcile(&printers);
+                            for error in &errors {
+                                airprinter::services::diagnostics::record(&format!(
+                                    "[AirPrinter] 共享同步失败: {error}"
+                                ));
+                            }
+                            if !errors.is_empty() {
+                                // Surface persistent background failures in the log panel.
+                                let _ = handle.emit("share-errors", errors);
                             }
                         }
                     }
-                    Err(error) => eprintln!("[AirPrinter] 检测 Windows 打印机失败: {error}"),
+                    Err(error) => airprinter::services::diagnostics::record(&format!(
+                        "[AirPrinter] 检测 Windows 打印机失败: {error}"
+                    )),
                 }
                 thread::sleep(reconcile_interval(
                     handle.get_webview_window("main").is_some(),

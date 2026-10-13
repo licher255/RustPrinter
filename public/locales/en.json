@@ -19,7 +19,8 @@
     "fetching_printers": "Fetching printer list...",
     "found_printers": "Found {{count}} printers",
     "sharing_printer": "Sharing printer: {{id}}...",
-    "stopped_sharing": "Stopped sharing: {{id}}"
+    "stopped_sharing": "Stopped sharing: {{id}}",
+    "reconcile_error": "Background share sync failed: {{error}}"
   },
   "caps": {
     "color": "Color",
