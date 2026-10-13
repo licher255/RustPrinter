@@ -21,6 +21,31 @@
     "sharing_printer": "正在共享打印机：{{id}}...",
     "stopped_sharing": "已停止共享：{{id}}"
   },
+  "caps": {
+    "color": "彩色",
+    "mono": "黑白",
+    "duplex_auto": "自动双面",
+    "duplex_none": "仅单面",
+    "copies": "最多 {{count}} 份",
+    "media": "纸张：{{list}}",
+    "media_more": "{{name}}（默认）等 {{count}} 种",
+    "media_detail": "支持纸张（共 {{count}} 种）：{{list}}",
+    "default_mark": "（默认）"
+  },
+  "alerts": {
+    "toner_low": "墨粉余量低",
+    "no_toner": "墨粉已用尽",
+    "paper_out": "缺纸",
+    "paper_jam": "卡纸",
+    "paper_problem": "纸张问题",
+    "door_open": "舱门打开",
+    "output_bin_full": "出纸托盘已满",
+    "manual_feed": "等待手动进纸",
+    "paused": "已暂停",
+    "user_intervention": "需要人工干预",
+    "warming_up": "预热中",
+    "power_save": "省电模式"
+  },
   "status": {
     "online": "在线",
     "offline": "离线",

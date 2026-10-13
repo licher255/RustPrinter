@@ -176,6 +176,7 @@ mod tests {
             name: "test".into(),
             status: airprinter::models::PrinterStatus::Online,
             capabilities: Default::default(),
+            alerts: Vec::new(),
         };
         let mut env = HashMap::from([
             ("IPP_PRINT_QUALITY".into(), "high".into()),

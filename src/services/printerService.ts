@@ -3,10 +3,30 @@ import { invoke } from "@tauri-apps/api/core";
 import { logService } from "./logService";
 import i18n from "../i18n"; // 确保引入
 
+export interface MediaSize {
+  name: string;
+  /** IPP dimensions, in hundredths of a millimetre. */
+  width: number;
+  height: number;
+  windows_kind: number;
+}
+
+export interface PrinterCapabilities {
+  color: boolean;
+  duplex: boolean;
+  max_copies: number;
+  media: string[];
+  default_media: string;
+  media_sizes: MediaSize[];
+}
+
 export interface Printer {
   name: string;
   id: string;
   status: "online" | "offline" | "busy" | string;
+  capabilities?: PrinterCapabilities;
+  /** Supply/hardware warnings decoded from Windows status bits, e.g. "toner_low". */
+  alerts?: string[];
 }
 
 export const printerApi = {

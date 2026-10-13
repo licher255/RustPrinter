@@ -21,6 +21,31 @@
     "sharing_printer": "Sharing printer: {{id}}...",
     "stopped_sharing": "Stopped sharing: {{id}}"
   },
+  "caps": {
+    "color": "Color",
+    "mono": "Mono",
+    "duplex_auto": "Auto duplex",
+    "duplex_none": "Single-sided",
+    "copies": "Up to {{count}} copies",
+    "media": "Paper: {{list}}",
+    "media_more": "{{name}} (default) and {{count}} more",
+    "media_detail": "Supported paper ({{count}}): {{list}}",
+    "default_mark": " (default)"
+  },
+  "alerts": {
+    "toner_low": "Toner/ink low",
+    "no_toner": "Toner/ink empty",
+    "paper_out": "Out of paper",
+    "paper_jam": "Paper jam",
+    "paper_problem": "Paper problem",
+    "door_open": "Door open",
+    "output_bin_full": "Output bin full",
+    "manual_feed": "Waiting for manual feed",
+    "paused": "Paused",
+    "user_intervention": "Needs attention",
+    "warming_up": "Warming up",
+    "power_save": "Power save mode"
+  },
   "status": {
     "online": "Online",
     "offline": "Offline",

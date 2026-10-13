@@ -272,6 +272,7 @@ mod tests {
             name: "AirPrinter reconnect simulation".into(),
             status: PrinterStatus::Online,
             capabilities: Default::default(),
+            alerts: Vec::new(),
         };
         let id = printer.id.clone();
 

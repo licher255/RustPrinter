@@ -29,6 +29,7 @@ fn main() -> Result<(), String> {
         name: name.clone(),
         status: PrinterStatus::Online,
         capabilities: Default::default(),
+        alerts: Vec::new(),
     };
     let public_printer = Printer::gateway_from(&printer);
     let mut server = AirPrintServer::isolated_for_test(address);

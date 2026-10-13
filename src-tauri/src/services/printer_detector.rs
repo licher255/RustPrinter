@@ -1,5 +1,23 @@
-use crate::models::printer::PrinterCapabilities;
+use crate::models::printer::{PrinterAlert, PrinterCapabilities};
 use crate::models::{Printer, PrinterStatus};
+
+/// PRINTER_STATUS_* bits (winspool.h) surfaced as display-only warnings.
+/// Windows does not expose ink/toner percentages via the spooler; these bits
+/// are the only supply information available without vendor protocols.
+const ALERT_BITS: &[(u32, PrinterAlert)] = &[
+    (0x0000_0001, PrinterAlert::Paused),
+    (0x0000_0008, PrinterAlert::PaperJam),
+    (0x0000_0010, PrinterAlert::PaperOut),
+    (0x0000_0020, PrinterAlert::ManualFeed),
+    (0x0000_0040, PrinterAlert::PaperProblem),
+    (0x0000_0800, PrinterAlert::OutputBinFull),
+    (0x0001_0000, PrinterAlert::WarmingUp),
+    (0x0002_0000, PrinterAlert::TonerLow),
+    (0x0004_0000, PrinterAlert::NoToner),
+    (0x0010_0000, PrinterAlert::UserIntervention),
+    (0x0040_0000, PrinterAlert::DoorOpen),
+    (0x0100_0000, PrinterAlert::PowerSave),
+];
 
 pub struct PrinterDetector;
 
@@ -42,6 +60,7 @@ fn parse_printers(data: &[u8]) -> Result<Vec<Printer>, String> {
     struct Queue {
         name: String,
         status: u32,
+        #[serde(default)]
         capabilities: PrinterCapabilities,
     }
     let queues: Vec<Queue> = serde_json::from_slice(data).map_err(|e| e.to_string())?;
@@ -63,6 +82,11 @@ fn parse_printers(data: &[u8]) -> Result<Vec<Printer>, String> {
                 name: queue.name,
                 status,
                 capabilities: queue.capabilities,
+                alerts: ALERT_BITS
+                    .iter()
+                    .filter(|(bit, _)| queue.status & bit != 0)
+                    .map(|(_, alert)| *alert)
+                    .collect(),
             }
         })
         .collect())
@@ -76,6 +100,14 @@ mod tests {
         let printers = parse_printers(r#"[{"name":"办公室打印机共享队列","status":128,"capabilities":{"color":false,"duplex":true,"max_copies":99,"media":["iso_a4_210x297mm"],"default_media":"iso_a4_210x297mm"}}]"#.as_bytes()).unwrap();
         assert_eq!(printers[0].id, "办公室打印机共享队列");
         assert!(matches!(printers[0].status, PrinterStatus::Offline));
+        // "capabilities" omitted entirely: the detector tolerates partial rows.
+        let low_toner = serde_json::json!([{"name":"粉量低", "status":131072}]);
+        let parsed = parse_printers(&serde_json::to_vec(&low_toner).unwrap()).unwrap();
+        assert!(
+            matches!(parsed[0].status, PrinterStatus::Online),
+            "toner-low alone must not take the queue offline"
+        );
+        assert_eq!(parsed[0].alerts, vec![PrinterAlert::TonerLow]);
         let mut encoded = serde_json::to_value(&printers[0].capabilities).unwrap();
         encoded["color"] = serde_json::json!(true);
         let printing =

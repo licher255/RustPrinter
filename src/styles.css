@@ -315,6 +315,53 @@ body {
     background: #f5f5f7;
   }
 
+  /* capability badges */
+  .printer-caps {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-top: 4px;
+  }
+
+  .cap-badge {
+    @apply inline-flex items-center rounded-full;
+    gap: 4px;
+    padding: 1px 8px;
+    font-size: 11px;
+    line-height: 1.6;
+    border: 1px solid transparent;
+  }
+
+  .cap-yes {
+    background: rgba(52, 199, 89, 0.12);
+    color: #1f7a38;
+    border-color: rgba(52, 199, 89, 0.25);
+  }
+
+  .cap-no {
+    background: #f0f0f2;
+    color: #86868b;
+    border-color: rgba(0, 0, 0, 0.06);
+  }
+
+  .cap-media {
+    max-width: 100%;
+  }
+
+  .cap-alert {
+    background: rgba(255, 149, 0, 0.12);
+    color: #b25c00;
+    border-color: rgba(255, 149, 0, 0.3);
+  }
+
+  .printer-media-detail {
+    font-size: 11px;
+    color: #86868b;
+    margin-top: 4px;
+    line-height: 1.6;
+    word-break: break-all;
+  }
+
   .printer-icon {
     width: 36px;
     height: 36px;

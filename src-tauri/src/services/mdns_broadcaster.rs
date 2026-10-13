@@ -284,6 +284,7 @@ mod tests {
             name: "办公室.彩色打印机".repeat(10),
             status: PrinterStatus::Online,
             capabilities: Default::default(),
+            alerts: Vec::new(),
         };
         let info = MdnsBroadcaster::service_info(
             &printer,
@@ -342,6 +343,7 @@ mod tests {
             name: "Office Printer".into(),
             status: PrinterStatus::Online,
             capabilities: Default::default(),
+            alerts: Vec::new(),
         };
         let second = Printer {
             id: "queue-two".into(),
@@ -367,6 +369,7 @@ mod tests {
             name: "Office A".into(),
             status: PrinterStatus::Online,
             capabilities: Default::default(),
+            alerts: Vec::new(),
         };
         target_a.capabilities.color = true;
         let mut target_b = Printer {
@@ -374,6 +377,7 @@ mod tests {
             name: "Office B".into(),
             status: PrinterStatus::Online,
             capabilities: Default::default(),
+            alerts: Vec::new(),
         };
         target_b.capabilities.duplex = true;
         let gateway_a = Printer::gateway_from(&target_a);
@@ -420,12 +424,14 @@ mod tests {
             name: "AirPrinter simulation A".into(),
             status: PrinterStatus::Online,
             capabilities: Default::default(),
+            alerts: Vec::new(),
         };
         let b = Printer {
             id: format!("simulation-b-{}", std::process::id()),
             name: "AirPrinter simulation B".into(),
             status: PrinterStatus::Online,
             capabilities: Default::default(),
+            alerts: Vec::new(),
         };
         broadcaster.broadcast_airprint(&a, 18631).unwrap();
         broadcaster.broadcast_airprint(&b, 18632).unwrap();

@@ -1,5 +1,23 @@
-import { printerApi, Printer } from "../services/printerService";
+import { printerApi, Printer, PrinterCapabilities } from "../services/printerService";
 import i18n from "../i18n";
+
+/** Friendly labels for the well-known IPP media keywords. */
+const MEDIA_LABELS: Record<string, string> = {
+  iso_a4_210x297mm: "A4",
+  iso_a5_148x210mm: "A5",
+  "na_letter_8.5x11in": "Letter",
+  "na_legal_8.5x14in": "Legal",
+};
+
+function mediaLabel(
+  name: string,
+  sizes: { name: string; width: number; height: number }[]
+): string {
+  if (MEDIA_LABELS[name]) return MEDIA_LABELS[name];
+  const size = sizes.find((s) => s.name === name);
+  if (size) return `${size.width / 100}×${size.height / 100}mm`;
+  return name;
+}
 
 export class PrinterList {
   private container: HTMLElement;
@@ -148,6 +166,8 @@ export class PrinterList {
               <span class="status-dot ${dotClass}"></span>
               <span>${statusText}</span>
             </div>
+            ${this.renderCaps(p.capabilities)}
+            ${this.renderAlerts(p.alerts)}
           </div>
           <input
             type="checkbox"
@@ -168,6 +188,60 @@ export class PrinterList {
         this.handleShare(id, toggle);
       });
     });
+  }
+
+  private renderCaps(caps?: PrinterCapabilities): string {
+    if (!caps) return "";
+    const badge = (
+      key: string,
+      icon: string,
+      supported: boolean,
+      params?: Record<string, unknown>
+    ) =>
+      `<span class="cap-badge ${supported ? "cap-yes" : "cap-no"}"><i class="fa-solid ${icon}" aria-hidden="true"></i>${escapeHtml(i18n.t(key, params))}</span>`;
+
+    const badges: string[] = [
+      badge(caps.color ? "caps.color" : "caps.mono", "fa-palette", caps.color),
+      badge(caps.duplex ? "caps.duplex_auto" : "caps.duplex_none", "fa-copy", caps.duplex),
+    ];
+    if (caps.max_copies > 1) {
+      badges.push(badge("caps.copies", "fa-layer-group", true, { count: caps.max_copies }));
+    }
+    let mediaDetail = "";
+    if (caps.media.length > 0) {
+      const all = caps.media.map((m) => mediaLabel(m, caps.media_sizes));
+      const defaultLabel = mediaLabel(caps.default_media, caps.media_sizes);
+      const summary =
+        all.length > 1
+          ? i18n.t("caps.media_more", { name: defaultLabel, count: all.length })
+          : defaultLabel;
+      badges.push(
+        `<span class="cap-badge cap-yes cap-media" title="${escapeHtml(all.join(", "))}"><i class="fa-solid fa-sheet-plastic" aria-hidden="true"></i>${escapeHtml(i18n.t("caps.media", { list: summary }))}</span>`
+      );
+      const formatMm = (hundredths: number) =>
+        (hundredths / 100).toFixed(1).replace(/\.0$/, "");
+      const details = caps.media.map((m) => {
+        const size = caps.media_sizes.find((s) => s.name === m);
+        const dims = size ? ` ${formatMm(size.width)}×${formatMm(size.height)}mm` : "";
+        const text = `${mediaLabel(m, caps.media_sizes)}${dims}`;
+        return m === caps.default_media
+          ? `${text}${i18n.t("caps.default_mark")}`
+          : text;
+      });
+      mediaDetail = `<div class="printer-media-detail">${escapeHtml(
+        i18n.t("caps.media_detail", { count: all.length, list: details.join("、") })
+      )}</div>`;
+    }
+    return `<div class="printer-caps">${badges.join("")}</div>${mediaDetail}`;
+  }
+
+  private renderAlerts(alerts?: string[]): string {
+    if (!alerts || alerts.length === 0) return "";
+    const badges = alerts.map((alert) => {
+      const label = i18n.t(`alerts.${alert}`, { defaultValue: alert });
+      return `<span class="cap-badge cap-alert"><i class="fa-solid fa-triangle-exclamation" aria-hidden="true"></i>${escapeHtml(label)}</span>`;
+    });
+    return `<div class="printer-caps">${badges.join("")}</div>`;
   }
 
   private async handleShare(printerId: string, toggle: HTMLInputElement) {

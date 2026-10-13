@@ -12,6 +12,30 @@ pub struct Printer {
     pub status: PrinterStatus,
     #[serde(default)]
     pub capabilities: PrinterCapabilities,
+    /// Supply/hardware warnings decoded from Windows status bits (toner low,
+    /// paper out, ...). Never affects shareability by itself; display only.
+    #[serde(default)]
+    pub alerts: Vec<PrinterAlert>,
+}
+
+/// Non-blocking printer warnings. Windows does not expose ink/toner
+/// percentages through the spooler API; these status bits are the available
+/// supply information.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PrinterAlert {
+    TonerLow,
+    NoToner,
+    PaperOut,
+    PaperJam,
+    PaperProblem,
+    DoorOpen,
+    OutputBinFull,
+    ManualFeed,
+    Paused,
+    UserIntervention,
+    WarmingUp,
+    PowerSave,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -99,6 +123,7 @@ impl Printer {
             id: GATEWAY_PRINTER_ID.into(),
             status: target.status.clone(),
             capabilities: target.capabilities.clone(),
+            alerts: target.alerts.clone(),
         }
     }
 
@@ -161,6 +186,7 @@ mod tests {
             id: "a/b %中".into(),
             status: PrinterStatus::Online,
             capabilities: PrinterCapabilities::default(),
+            alerts: Vec::new(),
         };
         assert_eq!(printer.resource_path().len(), 42);
         assert!(printer.resource_path().is_ascii());
@@ -174,6 +200,7 @@ mod tests {
             id: "queue-unique-id".into(),
             status: PrinterStatus::Online,
             capabilities: PrinterCapabilities::default(),
+            alerts: Vec::new(),
         };
         assert_eq!(printer.dns_sd_name("pc.local."), "Office-Printer");
 
@@ -192,6 +219,7 @@ mod tests {
             id: "queue-a".into(),
             status: PrinterStatus::Online,
             capabilities: PrinterCapabilities::default(),
+            alerts: Vec::new(),
         };
         first.capabilities.color = true;
         let mut second = Printer {
@@ -199,6 +227,7 @@ mod tests {
             id: "queue-b".into(),
             status: PrinterStatus::Busy,
             capabilities: PrinterCapabilities::default(),
+            alerts: Vec::new(),
         };
         second.capabilities.duplex = true;
 

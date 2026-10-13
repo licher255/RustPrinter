@@ -2396,6 +2396,7 @@ mod tests {
             id: name.into(),
             status: PrinterStatus::Online,
             capabilities: Default::default(),
+            alerts: Vec::new(),
         }
     }
     fn req(op: Operation, uri: &str) -> IppRequestResponse {
