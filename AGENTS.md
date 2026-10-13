@@ -223,6 +223,16 @@ netsh advfirewall firewall add rule name="IPP Server" dir=in action=allow protoc
 - `scripts/diagnose_network.ps1` - Network diagnostics
 - `scripts/diagnose_mdns.py` - mDNS service discovery check
 
+### Diagnostics Log
+
+- Persistent JSONL log at `%APPDATA%\com.airprinter.app\print-diagnostics.jsonl` (2 MiB rotation);
+  written by `services/diagnostics.rs::record()` — request metadata and errors only, never document bytes or TLS keys.
+- Startup records environment facts (version, exe path, all IPv4 interfaces) — key for "wrong NIC advertised" bugs.
+- In-app: Logs view → "诊断日志" tab shows the tail; buttons copy the log or reveal the file in Explorer
+  (commands `get_log_info` / `read_logs` / `open_log_folder` in `commands/logs.rs`).
+- First connectivity check: if a failing phone produces no `[IPP transport] peer=...` lines, the
+  connection never reached the app (firewall/NIC/network), not an IPP problem.
+
 ### Reconcile Debounce (airprint_server.rs)
 
 The 30s/300s `reconcile()` loop flapping guards:

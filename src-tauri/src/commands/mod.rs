@@ -12,6 +12,7 @@ pub struct AppState {
 }
 
 // 2. 声明子模块
+pub mod logs;
 pub mod printer;
 pub mod settings;
 pub mod system;
@@ -19,6 +20,7 @@ pub mod system;
 // 3. 重新导出子模块中的所有公开项
 // 这样 main.rs 就可以直接写: use airprinter::commands::{get_printers, set_language};
 // 而不需要写: use airprinter::commands::printer::get_printers;
+pub use logs::*;
 pub use printer::*;
 pub use settings::*;
 pub use system::*;

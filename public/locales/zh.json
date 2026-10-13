@@ -20,6 +20,17 @@
     "found_printers": "找到 {{count}} 台打印机",
     "sharing_printer": "正在共享打印机：{{id}}...",
     "stopped_sharing": "已停止共享：{{id}}",
+    "tab_session": "界面日志",
+    "tab_diagnostics": "诊断日志",
+    "refresh": "刷新诊断日志",
+    "copy": "复制日志",
+    "copy_failed": "复制日志失败：{{error}}",
+    "open_folder": "打开日志所在文件夹",
+    "open_folder_failed": "无法打开日志文件夹：{{error}}",
+    "path_label": "诊断日志文件：{{path}}（{{size}}）",
+    "diagnostics_loading": "正在读取诊断日志...",
+    "diagnostics_empty": "暂无诊断日志",
+    "diagnostics_failed": "读取诊断日志失败：{{error}}",
     "reconcile_error": "后台共享同步失败：{{error}}"
   },
   "caps": {

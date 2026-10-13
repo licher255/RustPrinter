@@ -13,8 +13,9 @@ use airprinter::*;
 
 // 导入命令
 use airprinter::commands::{
-    enable_lan_access, get_printers, get_settings, get_shared_printers, set_autostart,
-    set_close_to_tray, set_language, share_printer, stop_printer, unshare_printer, AppState,
+    enable_lan_access, get_log_info, get_printers, get_settings, get_shared_printers,
+    open_log_folder, read_logs, set_autostart, set_close_to_tray, set_language, share_printer,
+    stop_printer, unshare_printer, AppState,
 };
 
 const FOREGROUND_RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
@@ -40,6 +41,8 @@ fn main() {
             let config_dir = app.path().app_config_dir()?;
             if let Err(error) = airprinter::services::diagnostics::init(&config_dir) {
                 eprintln!("[AirPrinter] 初始化打印诊断记录失败: {error}");
+            } else {
+                airprinter::services::diagnostics::log_environment(&config_dir);
             }
             let preferences = config_dir.join("shared-printers.json");
             let settings_path = config_dir.join("settings.json");
@@ -147,6 +150,9 @@ fn main() {
             get_settings,
             set_close_to_tray,
             set_autostart,
+            get_log_info,
+            read_logs,
+            open_log_folder,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {

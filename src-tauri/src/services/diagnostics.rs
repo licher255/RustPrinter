@@ -30,6 +30,68 @@ pub fn record(message: &str) {
     }
 }
 
+/// Absolute path of the active diagnostics log file.
+pub fn file_path() -> Option<PathBuf> {
+    LOG.get()
+        .map(|log| log.lock().unwrap_or_else(|error| error.into_inner()).clone())
+}
+
+/// Read the newest log content, bounded so the frontend can display/copy it.
+pub fn tail(max_bytes: usize, max_lines: usize) -> Result<String, String> {
+    let Some(path) = file_path() else {
+        return Err("Diagnostics logging is not initialized".into());
+    };
+    tail_from(&path, max_bytes, max_lines)
+}
+
+fn tail_from(path: &Path, max_bytes: usize, max_lines: usize) -> Result<String, String> {
+    let data = fs::read(path).map_err(|error| error.to_string())?;
+    let mut start = data.len().saturating_sub(max_bytes);
+    // Never split a multi-byte UTF-8 character at the cut point.
+    while start < data.len() && (data[start] & 0b1100_0000) == 0b1000_0000 {
+        start += 1;
+    }
+    let text = String::from_utf8_lossy(&data[start..]);
+    let lines: Vec<&str> = text.lines().collect();
+    let kept = &lines[lines.len().saturating_sub(max_lines)..];
+    Ok(kept.join("\n"))
+}
+
+/// Record machine and network facts once at startup: exactly the data needed
+/// when a phone discovers the printer but cannot fetch its attributes.
+pub fn log_environment(config_dir: &Path) {
+    let exe = std::env::current_exe()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|_| "unknown".into());
+    let computer = std::env::var("COMPUTERNAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .unwrap_or_else(|_| "unknown".into());
+    record(&format!(
+        "[AirPrinter] environment version={} os={} arch={} computer={computer}",
+        env!("CARGO_PKG_VERSION"),
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+    ));
+    record(&format!("[AirPrinter] exe={exe}"));
+    record(&format!("[AirPrinter] config_dir={}", config_dir.display()));
+    match local_ip_address::list_afinet_netifas() {
+        Ok(interfaces) => {
+            let ipv4: Vec<String> = interfaces
+                .iter()
+                .filter(|(_, ip)| ip.is_ipv4())
+                .map(|(name, ip)| format!("{name}={ip}"))
+                .collect();
+            record(&format!(
+                "[AirPrinter] ipv4_interfaces={}",
+                ipv4.join(", ")
+            ));
+        }
+        Err(error) => record(&format!(
+            "[AirPrinter] could not list network interfaces: {error}"
+        )),
+    }
+}
+
 fn append(path: &Path, message: &str, limit: u64) -> io::Result<()> {
     let mut line = serde_json::to_vec(&serde_json::json!({
         "timestamp_ms": SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis(),
@@ -76,5 +138,28 @@ mod tests {
         assert!(fs::metadata(&path).unwrap().len() <= 200);
         assert!(path.with_extension("jsonl.previous").exists());
         assert!(fs::read_to_string(path).unwrap().contains("request_id=9"));
+    }
+
+    #[test]
+    fn tail_is_bounded_by_bytes_and_lines_without_splitting_utf8() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("print-diagnostics.jsonl");
+        for index in 0..20 {
+            append(
+                &path,
+                &format!("[IPP] 第{index}行 中文内容 padding-padding-padding"),
+                u64::MAX,
+            )
+            .unwrap();
+        }
+
+        let last_two = tail_from(&path, usize::MAX, 2).unwrap();
+        assert_eq!(last_two.lines().count(), 2);
+        assert!(last_two.contains("第19行"));
+
+        let tail = tail_from(&path, 120, usize::MAX).unwrap();
+        assert!(tail.len() <= 160, "tail should stay near the byte budget");
+        assert!(tail.contains('行'), "tail must not corrupt UTF-8: {tail}");
+        assert!(tail_from(&directory.path().join("missing.jsonl"), 10, 10).is_err());
     }
 }

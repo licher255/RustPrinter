@@ -188,6 +188,14 @@ impl MdnsBroadcaster {
         // A subtype's PTR targets the base _ipp instance. Register it ONCE, not
         // as a second service with a different SRV target (which overwrites it).
         let services = Self::service_infos(printer, &self.hostname, port, secure_port)?;
+        crate::services::diagnostics::record(&format!(
+            "[mDNS] broadcasting {} service(s): id={} hostname={} port={} ipps_port={:?}",
+            services.len(),
+            printer.id,
+            self.hostname,
+            port,
+            secure_port
+        ));
         if Self::fullname_conflicts(&self.registrations, &services) {
             return Err("Another shared printer already uses this DNS-SD instance name".into());
         }
@@ -226,6 +234,10 @@ impl MdnsBroadcaster {
                 }
             }
         }
+        crate::services::diagnostics::record(&format!(
+            "[mDNS] announced: {}",
+            fullnames.join(", ")
+        ));
         self.registrations.insert(printer.id.clone(), fullnames);
         Ok(())
     }

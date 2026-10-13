@@ -19,6 +19,10 @@ pub async fn enable_lan_access() -> Result<(), String> {
         tauri::async_runtime::spawn_blocking(|| {
             use std::os::windows::process::CommandExt;
             let program = std::env::current_exe().map_err(|e| e.to_string())?;
+            crate::services::diagnostics::record(&format!(
+                "[AirPrinter] requesting administrator approval for firewall rules: program={}",
+                program.display()
+            ));
             let elevate = r#"$ErrorActionPreference='Stop'; $encoded=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($env:AIRPRINTER_FIREWALL_SOURCE)); $process=Start-Process -FilePath powershell.exe -ArgumentList ('-NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand ' + $encoded) -Verb RunAs -WindowStyle Hidden -Wait -PassThru; exit $process.ExitCode"#;
             let output = std::process::Command::new("powershell.exe")
                 .args(["-NoProfile", "-NonInteractive", "-Command", elevate])
@@ -27,11 +31,20 @@ pub async fn enable_lan_access() -> Result<(), String> {
                 .output()
                 .map_err(|e| e.to_string())?;
             if output.status.success() {
+                crate::services::diagnostics::record(
+                    "[AirPrinter] firewall rules installed: inbound TCP 631, TCP 8631-8699, UDP 5353 (local subnet)",
+                );
                 Ok(())
             } else {
+                let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+                crate::services::diagnostics::record(&format!(
+                    "[AirPrinter] firewall setup failed: status={} stderr={}",
+                    output.status,
+                    stderr.trim()
+                ));
                 Err(format!(
                     "Windows did not enable LAN access (administrator approval may be required): {}",
-                    String::from_utf8_lossy(&output.stderr)
+                    stderr
                 ))
             }
         })

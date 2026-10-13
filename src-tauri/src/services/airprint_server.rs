@@ -130,6 +130,22 @@ impl AirPrintServer {
         if !matches!(printer.status, PrinterStatus::Online | PrinterStatus::Busy) {
             return Err(format!("Windows printer is not ready: {}", printer.name));
         }
+        crate::services::diagnostics::record(&format!(
+            "[AirPrint] share requested: id={} name={:?} status={}",
+            printer.id,
+            printer.name,
+            printer.status.as_str()
+        ));
+        crate::services::diagnostics::record(&format!(
+            "[AirPrint] capabilities: id={} color={} duplex={} max_copies={} default_media={} media=[{}] alerts={:?}",
+            printer.id,
+            printer.capabilities.color,
+            printer.capabilities.duplex,
+            printer.capabilities.max_copies,
+            printer.capabilities.default_media,
+            printer.capabilities.media.join(", "),
+            printer.alerts
+        ));
         let result = (|| {
             if self.mdns.is_none() {
                 let mdns = match self.mdns_interface {
@@ -147,6 +163,13 @@ impl AirPrintServer {
                         .map_err(|e| format!("IPPS listener: {e}"))?;
                 }
                 self.ipp_server = Some(ipp);
+                let ipp = self.ipp_server.as_ref().unwrap();
+                crate::services::diagnostics::record(&format!(
+                    "[AirPrint] listeners ready: ipp_port={} ipps_port={:?} mdns_hostname={}",
+                    ipp.port().unwrap_or(0),
+                    ipp.secure_port(),
+                    self.mdns.as_ref().unwrap().hostname()
+                ));
             }
             let mdns = self.mdns.as_mut().unwrap();
             let ipp = self.ipp_server.as_ref().unwrap();
@@ -158,6 +181,16 @@ impl AirPrintServer {
             }
             Ok::<(), String>(())
         })();
+        match &result {
+            Ok(()) => crate::services::diagnostics::record(&format!(
+                "[AirPrint] share succeeded: id={}",
+                printer.id
+            )),
+            Err(error) => crate::services::diagnostics::record(&format!(
+                "[AirPrint] share failed: id={} error={error}",
+                printer.id
+            )),
+        }
         if let Err(error) = result {
             if self.shared_printers.is_empty() {
                 self.mdns = None;

@@ -20,6 +20,17 @@
     "found_printers": "Found {{count}} printers",
     "sharing_printer": "Sharing printer: {{id}}...",
     "stopped_sharing": "Stopped sharing: {{id}}",
+    "tab_session": "Session",
+    "tab_diagnostics": "Diagnostics",
+    "refresh": "Refresh diagnostics log",
+    "copy": "Copy log",
+    "copy_failed": "Failed to copy log: {{error}}",
+    "open_folder": "Open log folder",
+    "open_folder_failed": "Could not open the log folder: {{error}}",
+    "path_label": "Diagnostics log: {{path}} ({{size}})",
+    "diagnostics_loading": "Loading diagnostics log...",
+    "diagnostics_empty": "No diagnostics logged yet",
+    "diagnostics_failed": "Failed to read diagnostics: {{error}}",
     "reconcile_error": "Background share sync failed: {{error}}"
   },
   "caps": {
